@@ -6,7 +6,7 @@ import type {
   ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import { createRequire } from "node:module";
-import { startServer } from "./lib/server.mjs";
+import { acquireServer } from "./lib/server.mjs";
 import { junieLogin, junieRefreshToken } from "./lib/oauth.mjs";
 import { buildProviderModels } from "./lib/models.mjs";
 import { getProxyDiagnostics } from "./lib/proxy.mjs";
@@ -176,8 +176,9 @@ function renderReportLine(raw: string, width: number, theme: Theme): string[] {
 }
 
 export default async function (pi: ExtensionAPI) {
-  // Start proxy on ephemeral port (OS assigns a free port)
-  const { server, port } = await startServer();
+  // One proxy per process, shared by every session/subagent (OS-assigned port)
+  const bridge = await acquireServer();
+  const { port } = bridge;
 
   const oauth = {
     name: "JetBrains Junie",
@@ -517,6 +518,6 @@ export default async function (pi: ExtensionAPI) {
 
   // Shutdown: close proxy when Pi exits
   pi.on("session_shutdown", async () => {
-    server.close();
+    bridge.release();
   });
 }
