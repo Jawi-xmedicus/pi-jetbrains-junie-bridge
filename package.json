@@ -1,6 +1,6 @@
 {
   "name": "pi-jetbrains-junie-bridge",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Pi extension that connects Pi coding agent with JetBrains Junie as the AI backend",
   "type": "module",
   "pi": {
@@ -27,7 +27,7 @@
   },
   "homepage": "https://github.com/Jawi-xmedicus/pi-jetbrains-junie-bridge#readme",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "files": [
     "index.ts",
@@ -35,7 +35,14 @@
     "docs/",
     "README.md"
   ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-ai": "^1.4.0",
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
   }
 }

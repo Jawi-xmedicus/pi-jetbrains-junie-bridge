@@ -1,6 +1,7 @@
-import { createServer } from "node:http";
-import { KNOWN_GRAZIE_MODELS, isLegacyModel, upstreamModelId } from "./models.mjs";
-import { proxyFetch, getProxyDiagnostics } from "./proxy.mjs";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { promises as dns } from "node:dns";
+import { KNOWN_GRAZIE_MODELS, isLegacyModel, upstreamModelId } from "./models.ts";
+import { proxyFetch, getProxyDiagnostics } from "./proxy.ts";
 
 // ─── Upstream Config ─────────────────────────────────────────────────────────
 const UPSTREAM_BASE = "https://ingrazzio-cloud-prod.labs.jb.gg";
@@ -11,33 +12,29 @@ const GRAZIE_AUTH_BASE = "https://ingrazzio-cloud-prod.labs.jb.gg";
 const BALANCE_TIMEOUT_MS = 8000;
 
 // Identifies the bridge to Grazie as the Junie CLI build the model list was
-// extracted from — keep in sync with the version noted in models.mjs.
+// extracted from — keep in sync with the version noted in models.ts.
 const GRAZIE_AGENT = JSON.stringify({ name: "junie:cli", version: "3659.7" });
 
 const LOOPBACK_HOST_RE = /^(localhost|127\.0\.0\.1)(:\d+)?$/;
 
 // ─── Proxy State (non-auth) ─────────────────────────────────────────────────
-const state = {
+const state: { freeGoogleApi: boolean; lastAuthHeader: string | undefined } = {
   freeGoogleApi: true,
   lastAuthHeader: undefined, // cached from last chat request for /junie/balance
 };
 
-function isOpenAIModel(id) { return id.startsWith("openai-"); }
-function isAnthropicModel(id) { return id.startsWith("claude-"); }
-function isGrokModel(id) { return id.startsWith("grok-"); }
-function isGeminiModel(id) { return id.startsWith("gemini-"); }
+type JsonObject = Record<string, unknown>;
+/** A request body Pi sends to the proxy — only `model` is inspected before sanitizing. */
+type Payload = JsonObject & { model: string };
 
 // Google models are not served on an OpenAI-shaped route: Junie talks to them
 // through a Vertex-style generateContent path (LLMAccess$Companion.
 // googleGenerateContent), with "jetbrains-grazie" as the project.
 const GOOGLE_PROJECT = "jetbrains-grazie";
-function googlePath(model, method) {
-  return `/v1beta1/projects/${GOOGLE_PROJECT}/locations/global/publishers/google/models/${model}:${method}`;
-}
 
 // ─── Headers ─────────────────────────────────────────────────────────────────
-function openaiHeaders(authHeader) {
-  const h = {
+function openaiHeaders(authHeader: string): Record<string, string> {
+  const h: Record<string, string> = {
     "Authorization": authHeader,
     "Content-Type": "application/json",
     "Accept": "text/event-stream,application/json",
@@ -55,16 +52,16 @@ function openaiHeaders(authHeader) {
 // Grok goes through the same OpenAI Responses payload/path, only the
 // X-LLM-Model routing header differs (LlmProvider.XAI → "grok" in
 // IngrazzioLLMAccessKt).
-function grokHeaders(authHeader) {
+function grokHeaders(authHeader: string): Record<string, string> {
   return { ...openaiHeaders(authHeader), "X-LLM-Model": "grok" };
 }
 
-function googleHeaders(authHeader) {
+function googleHeaders(authHeader: string): Record<string, string> {
   return { ...openaiHeaders(authHeader), "X-LLM-Model": "google" };
 }
 
-function anthropicHeaders(authHeader) {
-  const h = {
+function anthropicHeaders(authHeader: string): Record<string, string> {
+  const h: Record<string, string> = {
     "Authorization": authHeader,
     "Content-Type": "application/json",
     "Accept": "text/event-stream,application/json",
@@ -104,20 +101,20 @@ const RESPONSES_ALLOWED = new Set([
   "store", "stream", "temperature", "top_p", "cache_control",
 ]);
 
-function sanitizeOpenAI(payload) {
-  const safe = {};
+function sanitizeOpenAI(payload: Payload): JsonObject {
+  const safe: JsonObject = {};
   for (const [k, v] of Object.entries(payload)) {
     if (OPENAI_ALLOWED.has(k)) safe[k] = v;
   }
   safe.model = upstreamModelId(payload.model);
   if (safe.stream) {
-    safe.stream_options = { include_usage: true, ...(safe.stream_options || {}) };
+    safe.stream_options = { include_usage: true, ...((safe.stream_options as object | undefined) ?? {}) };
   }
   return safe;
 }
 
-function sanitizeResponses(payload) {
-  const safe = {};
+function sanitizeResponses(payload: Payload): JsonObject {
+  const safe: JsonObject = {};
   for (const [k, v] of Object.entries(payload)) {
     if (RESPONSES_ALLOWED.has(k)) safe[k] = v;
   }
@@ -125,8 +122,8 @@ function sanitizeResponses(payload) {
   return safe;
 }
 
-function sanitizeAnthropic(payload) {
-  const safe = {};
+function sanitizeAnthropic(payload: Payload): JsonObject {
+  const safe: JsonObject = {};
   for (const [k, v] of Object.entries(payload)) {
     if (ANTHROPIC_ALLOWED.has(k)) {
       safe[k] = k === "system" ? sanitizeSystem(v) : v;
@@ -135,7 +132,7 @@ function sanitizeAnthropic(payload) {
   return safe;
 }
 
-function sanitizeSystem(system) {
+function sanitizeSystem(system: unknown): unknown {
   if (!Array.isArray(system)) return system;
   return system.map((block) => {
     if (typeof block !== "object" || block === null || !("cache_control" in block)) return block;
@@ -151,7 +148,12 @@ function sanitizeSystem(system) {
  * the account; the header is then dropped for good and the request repeated
  * once. `headersFor` is re-evaluated so the retry sees the new state.
  */
-async function postUpstream(url, headersFor, body, signal) {
+async function postUpstream(
+  url: string,
+  headersFor: () => Record<string, string>,
+  body: string,
+  signal: AbortSignal,
+): Promise<Response> {
   const send = () => proxyFetch(url, { method: "POST", headers: headersFor(), body, signal });
   let res = await send();
   if (res.status === 477 && state.freeGoogleApi) {
@@ -162,7 +164,7 @@ async function postUpstream(url, headersFor, body, signal) {
   return res;
 }
 
-function forwardOpenAI(payload, authHeader, signal) {
+function forwardOpenAI(payload: Payload, authHeader: string, signal: AbortSignal): Promise<Response> {
   return postUpstream(
     `${UPSTREAM_BASE}/v1/chat/completions`,
     () => openaiHeaders(authHeader),
@@ -171,25 +173,32 @@ function forwardOpenAI(payload, authHeader, signal) {
   );
 }
 
-function forwardResponses(payload, authHeader, signal) {
+function forwardResponses(payload: Payload, authHeader: string, signal: AbortSignal): Promise<Response> {
   return postUpstream(
     `${UPSTREAM_BASE}/v1/responses`,
-    () => (isGrokModel(payload.model) ? grokHeaders(authHeader) : openaiHeaders(authHeader)),
+    () => (payload.model.startsWith("grok-") ? grokHeaders(authHeader) : openaiHeaders(authHeader)),
     JSON.stringify(sanitizeResponses(payload)),
     signal,
   );
 }
 
-function forwardGoogle(model, method, search, body, authHeader, signal) {
+function forwardGoogle(
+  model: string,
+  method: string,
+  search: string,
+  body: string,
+  authHeader: string,
+  signal: AbortSignal,
+): Promise<Response> {
   return postUpstream(
-    `${UPSTREAM_BASE}${googlePath(model, method)}${search}`,
+    `${UPSTREAM_BASE}/v1beta1/projects/${GOOGLE_PROJECT}/locations/global/publishers/google/models/${model}:${method}${search}`,
     () => googleHeaders(authHeader),
     body,
     signal,
   );
 }
 
-function forwardAnthropic(payload, authHeader, signal) {
+function forwardAnthropic(payload: Payload, authHeader: string, signal: AbortSignal): Promise<Response> {
   return postUpstream(
     `${UPSTREAM_BASE}/v1/messages`,
     () => anthropicHeaders(authHeader),
@@ -204,12 +213,15 @@ const PROXY_407_HINT =
   "Install a local proxy like px (https://github.com/genotrance/px) that handles NTLM/Kerberos, " +
   "then set HTTPS_PROXY=http://localhost:<px-port> before starting Pi.";
 
-function extractErrorMessage(e) {
-  const parts = [e.message];
-  if (e.cause) {
-    parts.push(e.cause.message ?? String(e.cause));
-    if (e.cause.code) parts.push(`code=${e.cause.code}`);
-    if (e.cause.cause) parts.push(e.cause.cause.message ?? String(e.cause.cause));
+interface ErrorWithCause { message?: string; code?: string; cause?: ErrorWithCause }
+
+function extractErrorMessage(e: unknown): string {
+  const err = e as ErrorWithCause;
+  const parts: (string | undefined)[] = [err.message];
+  if (err.cause) {
+    parts.push(err.cause.message ?? String(err.cause));
+    if (err.cause.code) parts.push(`code=${err.cause.code}`);
+    if (err.cause.cause) parts.push(err.cause.cause.message ?? String(err.cause.cause));
   }
   const msg = parts.filter(Boolean).join(" — ");
   if (/407/.test(msg)) return `${msg}\n\nHint: ${PROXY_407_HINT}`;
@@ -217,21 +229,21 @@ function extractErrorMessage(e) {
 }
 
 // ─── HTTP Helpers ───────────────────────────────────────────────────────────
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString()));
-    req.on("error", reject);
-  });
+function readBody(req: IncomingMessage): Promise<string> {
+  const { promise, resolve, reject } = Promise.withResolvers<string>();
+  const chunks: Buffer[] = [];
+  req.on("data", (c: Buffer) => chunks.push(c));
+  req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+  req.on("error", reject);
+  return promise;
 }
 
-function sendJson(res, status, data) {
+function sendJson(res: ServerResponse, status: number, data: unknown): void {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
 }
 
-function getAuthHeader(req) {
+function getAuthHeader(req: IncomingMessage): string | undefined {
   // The @google/genai SDK sends the key as x-goog-api-key, everything else as
   // a bearer token in Authorization.
   const googleKey = req.headers["x-goog-api-key"];
@@ -246,7 +258,7 @@ function getAuthHeader(req) {
  * complete (e.g. Esc during a turn), so the upstream request — and the credits
  * it burns — stops with it.
  */
-function clientSignal(res) {
+function clientSignal(res: ServerResponse): AbortSignal {
   const controller = new AbortController();
   res.once("close", () => {
     if (!res.writableFinished) controller.abort();
@@ -254,7 +266,7 @@ function clientSignal(res) {
   return controller.signal;
 }
 
-async function pipeSSE(upstreamRes, res) {
+async function pipeSSE(upstreamRes: Response, res: ServerResponse): Promise<void> {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -272,10 +284,10 @@ async function pipeSSE(upstreamRes, res) {
       const { done, value } = await reader.read();
       if (done) break;
       if (!res.write(value)) {
-        await new Promise((resolve) => {
-          res.once("drain", resolve);
-          res.once("close", resolve);
-        });
+        const { promise: drained, resolve: onDrained } = Promise.withResolvers<void>();
+        res.once("drain", onDrained);
+        res.once("close", onDrained);
+        await drained;
       }
     }
   } catch (e) {
@@ -289,9 +301,24 @@ async function pipeSSE(upstreamRes, res) {
   res.end();
 }
 
+const INVALID_BODY_MESSAGE = "Request body must be a JSON object with a string `model`.";
+
+/** Parses a request body; null unless it is a JSON object carrying a string `model`. */
+function parsePayload(body: string): Payload | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  if (!("model" in parsed) || typeof parsed.model !== "string") return null;
+  return { ...parsed, model: parsed.model };
+}
+
 // ─── Route Handlers ─────────────────────────────────────────────────────────
 
-async function handleChatCompletions(req, res) {
+async function handleChatCompletions(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const auth = getAuthHeader(req);
   if (!auth) {
     sendJson(res, 401, { error: { message: "Not authenticated — run /login in Pi", type: "auth_error" } });
@@ -301,9 +328,13 @@ async function handleChatCompletions(req, res) {
 
   try {
     const body = await readBody(req);
-    const payload = JSON.parse(body);
+    const payload = parsePayload(body);
+    if (!payload) {
+      sendJson(res, 400, { error: { message: INVALID_BODY_MESSAGE, type: "invalid_request" } });
+      return;
+    }
 
-    if (!isOpenAIModel(payload.model)) {
+    if (!payload.model.startsWith("openai-")) {
       sendJson(res, 400, { error: { message: `Model ${payload.model} is not supported via /v1/chat/completions. Use claude-* models via /v1/messages.`, type: "invalid_request" } });
       return;
     }
@@ -327,7 +358,7 @@ async function handleChatCompletions(req, res) {
   }
 }
 
-async function handleResponses(req, res) {
+async function handleResponses(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const auth = getAuthHeader(req);
   if (!auth) {
     sendJson(res, 401, { error: { message: "Not authenticated — run /login in Pi", type: "auth_error" } });
@@ -337,9 +368,13 @@ async function handleResponses(req, res) {
 
   try {
     const body = await readBody(req);
-    const payload = JSON.parse(body);
+    const payload = parsePayload(body);
+    if (!payload) {
+      sendJson(res, 400, { error: { message: INVALID_BODY_MESSAGE, type: "invalid_request" } });
+      return;
+    }
 
-    if (!isOpenAIModel(payload.model) && !isGrokModel(payload.model)) {
+    if (!payload.model.startsWith("openai-") && !payload.model.startsWith("grok-")) {
       sendJson(res, 400, { error: { message: `Model ${payload.model} is not supported via /v1/responses. Use claude-* models via /v1/messages.`, type: "invalid_request" } });
       return;
     }
@@ -363,7 +398,7 @@ async function handleResponses(req, res) {
   }
 }
 
-async function handleMessages(req, res) {
+async function handleMessages(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const auth = getAuthHeader(req);
   if (!auth) {
     sendJson(res, 401, { error: { message: "Not authenticated — run /login in Pi", type: "auth_error" } });
@@ -373,9 +408,13 @@ async function handleMessages(req, res) {
 
   try {
     const body = await readBody(req);
-    const payload = JSON.parse(body);
+    const payload = parsePayload(body);
+    if (!payload) {
+      sendJson(res, 400, { error: { message: INVALID_BODY_MESSAGE, type: "invalid_request" } });
+      return;
+    }
 
-    if (!isAnthropicModel(payload.model)) {
+    if (!payload.model.startsWith("claude-")) {
       sendJson(res, 400, { error: { message: `Model ${payload.model} should use /v1/chat/completions, not /v1/messages.`, type: "invalid_request" } });
       return;
     }
@@ -406,7 +445,7 @@ async function handleMessages(req, res) {
  * Grazie Vertex path. Request and response bodies pass through untouched —
  * the Grazie backend speaks the same generateContent schema.
  */
-async function handleGoogle(req, res, url) {
+async function handleGoogle(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   const auth = getAuthHeader(req);
   if (!auth) {
     sendJson(res, 401, { error: { message: "Not authenticated — run /login in Pi", type: "auth_error" } });
@@ -419,9 +458,9 @@ async function handleGoogle(req, res, url) {
     sendJson(res, 404, { error: { message: `Unsupported Google path: ${url.pathname}`, type: "not_found" } });
     return;
   }
-  const [, model, method] = match;
+  const [, model = "", method = ""] = match;
 
-  if (!isGeminiModel(model)) {
+  if (!model.startsWith("gemini-")) {
     sendJson(res, 400, { error: { message: `Model ${model} is not a Google model.`, type: "invalid_request" } });
     return;
   }
@@ -447,16 +486,23 @@ async function handleGoogle(req, res, url) {
   }
 }
 
-function handleModels(_req, res) {
+/** Body of GET /v1/models. */
+export interface ModelsResponse {
+  object: "list";
+  data: { id: string; object: "model"; created: number; owned_by: string }[];
+}
+
+function handleModels(_req: IncomingMessage, res: ServerResponse): void {
   const models = KNOWN_GRAZIE_MODELS
     .filter((id) => !isLegacyModel(id))
     .map((id) => ({
       id,
-      object: "model",
+      object: "model" as const,
       created: 0,
-      owned_by: id.split("-")[0],
+      owned_by: id.split("-")[0] ?? id,
     }));
-  sendJson(res, 200, { object: "list", data: models });
+  const body: ModelsResponse = { object: "list", data: models };
+  sendJson(res, 200, body);
 }
 
 // Grazie's QuotaAPI — the same endpoints IntelliJ/Junie-in-IDE use (see
@@ -466,7 +512,56 @@ function handleModels(_req, res) {
 // Amounts are Credit objects: { "amount": "1969436.7795" }.
 // Accounts without an active licence (plain TRIAL credits) get a 400 here —
 // hence every quota call is best-effort and never fails the balance itself.
-async function grazieQuotaPost(auth, path) {
+// ── Shapes of the Grazie responses the bridge reads (all fields optional: the
+// backend is not ours, so nothing is assumed beyond what is accessed below).
+interface GrazieCredit { amount?: string | number }
+interface GrazieQuotaDetails { current?: GrazieCredit; maximum?: GrazieCredit; available?: GrazieCredit }
+interface GrazieQuotaResponse {
+  current?: {
+    license?: string;
+    current?: GrazieCredit;
+    maximum?: GrazieCredit;
+    until?: number;
+    tariffQuota?: GrazieQuotaDetails;
+    topUpQuota?: GrazieQuotaDetails;
+  };
+}
+interface GrazieRefillResponse {
+  current?: {
+    next?: number;
+    last?: number;
+    tariff?: { amount?: GrazieCredit; period?: { millis?: number } };
+  };
+}
+interface AuthTestResponse {
+  balanceLeft?: number;
+  balanceUnit?: string;
+  licenseType?: string;
+  active?: boolean;
+}
+
+export interface CreditBucket { spent?: number; maximum?: number; available?: number }
+export interface QuotaSummary {
+  license?: string;
+  spent?: number;
+  maximum?: number;
+  available: number;
+  until?: number;
+  tariff?: CreditBucket;
+  topUp?: CreditBucket;
+  refill?: { next?: number; last?: number; amount?: number; periodMs?: number };
+}
+/** Body of GET /junie/balance — also what the error branches send (`error` only). */
+export interface BalanceResponse {
+  balanceLeft?: number;
+  balanceUnit?: string;
+  licenseType?: string;
+  active?: boolean;
+  quota?: QuotaSummary;
+  error?: { message: string; type: string };
+}
+
+async function grazieQuotaPost<T>(auth: string, path: string): Promise<T> {
   const upstream = await proxyFetch(`${GRAZIE_AUTH_BASE}${path}`, {
     method: "POST",
     headers: { "Authorization": auth, "Content-Type": "application/json" },
@@ -474,17 +569,17 @@ async function grazieQuotaPost(auth, path) {
     signal: AbortSignal.timeout(BALANCE_TIMEOUT_MS),
   });
   if (!upstream.ok) throw new Error(`${path} → ${upstream.status}`);
-  return upstream.json();
+  return (await upstream.json()) as T;
 }
 
-function creditAmount(credit) {
+function creditAmount(credit: GrazieCredit | undefined): number | undefined {
   const n = Number(credit?.amount);
   return Number.isFinite(n) ? n : undefined;
 }
 
 // { current, maximum, available } — note that Grazie's "current" is the amount
 // *spent*, not the amount left; "available" is what remains.
-function quotaDetails(details) {
+function quotaDetails(details: GrazieQuotaDetails | undefined): CreditBucket | undefined {
   if (!details) return undefined;
   return {
     spent: creditAmount(details.current),
@@ -493,14 +588,14 @@ function quotaDetails(details) {
   };
 }
 
-function buildQuota(quota, refill) {
+function buildQuota(quota: GrazieQuotaResponse | undefined, refill: GrazieRefillResponse | undefined): QuotaSummary | undefined {
   const current = quota?.current;
   if (!current) return undefined;
 
   const tariff = quotaDetails(current.tariffQuota);
   const topUp = quotaDetails(current.topUpQuota);
   const available = [tariff?.available, topUp?.available]
-    .filter((n) => typeof n === "number")
+    .filter((n): n is number => typeof n === "number")
     .reduce((a, b) => a + b, 0);
 
   return {
@@ -520,7 +615,7 @@ function buildQuota(quota, refill) {
   };
 }
 
-async function handleBalance(req, res) {
+async function handleBalance(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // Use explicitly provided auth, or fall back to last seen auth from chat requests
   const auth = getAuthHeader(req) || state.lastAuthHeader;
   if (!auth) {
@@ -536,8 +631,8 @@ async function handleBalance(req, res) {
         headers: { "Authorization": auth },
         signal: AbortSignal.timeout(BALANCE_TIMEOUT_MS),
       }),
-      grazieQuotaPost(auth, "/user/v5/quota/get").catch(() => undefined),
-      grazieQuotaPost(auth, "/user/v5/quota/metadata/refill").catch(() => undefined),
+      grazieQuotaPost<GrazieQuotaResponse>(auth, "/user/v5/quota/get").catch(() => undefined),
+      grazieQuotaPost<GrazieRefillResponse>(auth, "/user/v5/quota/metadata/refill").catch(() => undefined),
     ]);
 
     if (!test.ok) {
@@ -554,7 +649,7 @@ async function handleBalance(req, res) {
       });
       return;
     }
-    const info = await test.json();
+    const info = (await test.json()) as AuthTestResponse;
     const details = buildQuota(quota, refill);
 
     sendJson(res, 200, {
@@ -570,9 +665,17 @@ async function handleBalance(req, res) {
   }
 }
 
-async function handleConnTest(_req, res) {
+export interface ConnTestResult {
+  proxy: string | null;
+  proxyAuth: string;
+  nodeVersion: string;
+  upstream: string;
+  tests: Record<string, { ok: boolean; status?: number; addresses?: string[]; error?: string }>;
+}
+
+async function handleConnTest(_req: IncomingMessage, res: ServerResponse): Promise<void> {
   const diag = getProxyDiagnostics();
-  const result = {
+  const result: ConnTestResult = {
     proxy: diag.proxy,
     proxyAuth: diag.auth,
     nodeVersion: process.version,
@@ -582,12 +685,11 @@ async function handleConnTest(_req, res) {
 
   // Test 1: DNS resolution
   try {
-    const { promises: dns } = await import("node:dns");
     const host = new URL(UPSTREAM_BASE).hostname;
     const addrs = await dns.resolve4(host);
     result.tests.dns = { ok: true, addresses: addrs };
   } catch (e) {
-    result.tests.dns = { ok: false, error: e.message };
+    result.tests.dns = { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 
   // Test 2: HTTPS fetch through proxy
@@ -604,7 +706,12 @@ async function handleConnTest(_req, res) {
 
 // ─── Server ─────────────────────────────────────────────────────────────────
 
-async function startServer() {
+interface StartedServer {
+  server: Server;
+  port: number;
+}
+
+async function startServer(): Promise<StartedServer> {
   const server = createServer(async (req, res) => {
     // The proxy only ever talks to Pi on loopback. Rejecting foreign Host
     // headers (DNS rebinding) and sending no CORS headers keeps web pages open
@@ -639,11 +746,17 @@ async function startServer() {
     }
   });
 
-  const port = await new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => {
-      resolve(server.address().port);
-    });
+  const { promise: listening, resolve: onListening, reject: onListenError } = Promise.withResolvers<number>();
+  server.once("error", onListenError);
+  server.listen(0, "127.0.0.1", () => {
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      onListenError(new Error("Proxy server has no TCP address"));
+      return;
+    }
+    onListening(address.port);
   });
+  const port = await listening;
 
   return { server, port };
 }
@@ -659,31 +772,45 @@ async function startServer() {
 // reference-counted, and it only closes once the last instance is gone.
 const SHARED = Symbol.for("pi-jetbrains-junie-bridge.server");
 
-export async function acquireServer() {
-  let entry = globalThis[SHARED];
+interface SharedServer {
+  refs: number;
+  ready: Promise<StartedServer>;
+}
+
+/** A handle on the process-wide proxy; call `release` when the session ends. */
+export interface ServerLease {
+  port: number;
+  release: () => void;
+}
+
+export async function acquireServer(): Promise<ServerLease> {
+  const shared = globalThis as unknown as Record<symbol, SharedServer | undefined>;
+  let entry = shared[SHARED];
   if (!entry) {
-    entry = { refs: 0, ready: startServer() };
-    globalThis[SHARED] = entry;
-    entry.ready.catch(() => {
-      if (globalThis[SHARED] === entry) delete globalThis[SHARED];
+    const created: SharedServer = { refs: 0, ready: startServer() };
+    entry = created;
+    shared[SHARED] = created;
+    created.ready.catch(() => {
+      if (shared[SHARED] === created) delete shared[SHARED];
     });
   }
-  entry.refs++;
+  const lease = entry;
+  lease.refs++;
 
   let released = false;
   const release = () => {
     if (released) return;
     released = true;
-    if (--entry.refs > 0) return;
-    if (globalThis[SHARED] === entry) delete globalThis[SHARED];
-    entry.ready.then(({ server }) => {
+    if (--lease.refs > 0) return;
+    if (shared[SHARED] === lease) delete shared[SHARED];
+    lease.ready.then(({ server }) => {
       server.close();
       server.closeIdleConnections?.();
     }, () => {});
   };
 
   try {
-    const { port } = await entry.ready;
+    const { port } = await lease.ready;
     return { port, release };
   } catch (e) {
     release();

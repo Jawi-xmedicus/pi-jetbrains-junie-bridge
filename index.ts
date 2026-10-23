@@ -6,10 +6,11 @@ import type {
   ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import { createRequire } from "node:module";
-import { acquireServer } from "./lib/server.mjs";
-import { junieLogin, junieRefreshToken } from "./lib/oauth.mjs";
-import { buildProviderModels } from "./lib/models.mjs";
-import { getProxyDiagnostics } from "./lib/proxy.mjs";
+import { acquireServer } from "./lib/server.ts";
+import type { BalanceResponse, ConnTestResult, ModelsResponse } from "./lib/server.ts";
+import { junieLogin, junieRefreshToken } from "./lib/oauth.ts";
+import { buildProviderModels } from "./lib/models.ts";
+import { getProxyDiagnostics } from "./lib/proxy.ts";
 
 const require = createRequire(import.meta.url);
 const { version: PLUGIN_VERSION } = require("./package.json");
@@ -162,7 +163,7 @@ function renderReportLine(raw: string, width: number, theme: Theme): string[] {
   // Heading with a label: "**Balance:** $5.00 remaining"
   const labelled = plain.match(/^\*\*(.+?)\*\*\s*(.*)$/s);
   if (labelled) {
-    const [, label, rest] = labelled;
+    const [, label = "", rest = ""] = labelled;
     return wrapSpans(
       [{ text: label, color: "accent", bold: true }, ...valueSpans(rest, "muted")],
       available,
@@ -252,7 +253,7 @@ export default async function (pi: ExtensionAPI) {
         headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
       });
       if (!res.ok) return;
-      const { balanceLeft, balanceUnit } = await res.json();
+      const { balanceLeft, balanceUnit } = (await res.json()) as BalanceResponse;
       if (typeof balanceLeft !== "number") return;
       return { balanceLeft, balanceUnit };
     } catch {
@@ -411,9 +412,9 @@ export default async function (pi: ExtensionAPI) {
       ]);
 
       // Read the body either way — on failure it carries the reason
-      const balanceInfo = await balanceRes.json().catch(() => null);
-      const modelsInfo = modelsRes.ok ? await modelsRes.json() : null;
-      const testInfo = testRes?.ok ? await testRes.json().catch(() => null) : null;
+      const balanceInfo = (await balanceRes.json().catch(() => null)) as BalanceResponse | null;
+      const modelsInfo = modelsRes.ok ? ((await modelsRes.json()) as ModelsResponse) : null;
+      const testInfo = testRes?.ok ? ((await testRes.json().catch(() => null)) as ConnTestResult | null) : null;
 
       const lines = reportHeader();
       lines.push("");

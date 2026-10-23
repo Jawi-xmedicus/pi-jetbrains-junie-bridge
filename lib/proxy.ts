@@ -14,13 +14,22 @@
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { connect as tlsConnect } from "node:tls";
-import { Readable } from "node:stream";
+import { Readable, type Duplex } from "node:stream";
+import type { IncomingHttpHeaders } from "node:http";
+
+/** The subset of fetch() options the bridge uses. */
+export interface ProxyFetchOptions {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string | URLSearchParams | null;
+  signal?: AbortSignal;
+}
 
 // Statuses where the fetch spec forbids a body; passing one to `new Response`
 // throws, so they get an explicit null.
 const NULL_BODY_STATUS = new Set([101, 103, 204, 205, 304]);
 
-export function getProxyUrl() {
+export function getProxyUrl(): string | null {
   return process.env.HTTPS_PROXY || process.env.https_proxy ||
          process.env.HTTP_PROXY || process.env.http_proxy || null;
 }
@@ -30,7 +39,7 @@ export function getProxyUrl() {
  * PROXY_AUTH_TOKEN wins, and is assumed to be a bare Basic token unless it
  * already carries a scheme (i.e. contains a space).
  */
-function getProxyAuth(parsedProxyUrl) {
+function getProxyAuth(parsedProxyUrl: URL): string | null {
   const token = process.env.PROXY_AUTH_TOKEN;
   if (token) return token.includes(" ") ? token : `Basic ${token}`;
   if (parsedProxyUrl.username) {
@@ -41,13 +50,13 @@ function getProxyAuth(parsedProxyUrl) {
 }
 
 /** CONNECT through the proxy, resolving with the raw tunnelled socket. */
-function openTunnel(proxyUrl, host, port, signal) {
+function openTunnel(proxyUrl: string, host: string, port: string | number, signal?: AbortSignal): Promise<Duplex> {
   return new Promise((resolve, reject) => {
     const proxy = new URL(proxyUrl);
     const proxyIsTls = proxy.protocol === "https:";
     const target = `${host}:${port}`;
 
-    const headers = { host: target };
+    const headers: Record<string, string> = { host: target };
     const auth = getProxyAuth(proxy);
     if (auth) headers["Proxy-Authorization"] = auth;
 
@@ -64,7 +73,7 @@ function openTunnel(proxyUrl, host, port, signal) {
       if (res.statusCode !== 200) {
         socket.destroy();
         // Keep the status code in the message — extractErrorMessage() in
-        // server.mjs looks for 407 to surface the NTLM/Kerberos hint.
+        // server.ts looks for 407 to surface the NTLM/Kerberos hint.
         reject(new Error(`Proxy CONNECT failed: ${res.statusCode} ${res.statusMessage ?? ""}`.trim()));
         return;
       }
@@ -76,7 +85,7 @@ function openTunnel(proxyUrl, host, port, signal) {
 }
 
 /** Node's header bag (values may be arrays, e.g. set-cookie) → Headers. */
-function toHeaders(nodeHeaders) {
+function toHeaders(nodeHeaders: IncomingHttpHeaders): Headers {
   const headers = new Headers();
   for (const [name, value] of Object.entries(nodeHeaders)) {
     if (value === undefined) continue;
@@ -86,15 +95,15 @@ function toHeaders(nodeHeaders) {
 }
 
 /** Request over an already-established tunnel, resolved as a fetch Response. */
-function requestOverSocket(socket, target, options) {
+function requestOverSocket(socket: Duplex, target: URL, options: ProxyFetchOptions): Promise<Response> {
   return new Promise((resolve, reject) => {
     const body = options.body == null ? null
       : typeof options.body === "string" ? options.body
       : String(options.body); // URLSearchParams and friends
 
-    const headers = { ...options.headers };
+    const headers: Record<string, string> = { ...options.headers };
     if (body !== null && !Object.keys(headers).some((h) => h.toLowerCase() === "content-length")) {
-      headers["Content-Length"] = Buffer.byteLength(body);
+      headers["Content-Length"] = String(Buffer.byteLength(body));
     }
 
     const req = httpsRequest({
@@ -105,7 +114,7 @@ function requestOverSocket(socket, target, options) {
       createConnection: () => tlsConnect({ socket, servername: target.hostname }),
     }, (res) => {
       const status = res.statusCode ?? 502;
-      resolve(new Response(NULL_BODY_STATUS.has(status) ? null : Readable.toWeb(res), {
+      resolve(new Response(NULL_BODY_STATUS.has(status) ? null : (Readable.toWeb(res) as unknown as ReadableStream), {
         status,
         statusText: res.statusMessage,
         headers: toHeaders(res.headers),
@@ -128,7 +137,7 @@ function requestOverSocket(socket, target, options) {
  * costs one extra handshake per request on the proxy path, which is not worth
  * a dependency for the request volume this bridge sees.
  */
-export async function proxyFetch(url, options = {}) {
+export async function proxyFetch(url: string, options: ProxyFetchOptions = {}): Promise<Response> {
   const proxyUrl = getProxyUrl();
   if (!proxyUrl) return globalThis.fetch(url, options);
   options.signal?.throwIfAborted();
@@ -145,13 +154,13 @@ export async function proxyFetch(url, options = {}) {
     });
   }
 
-  const socket = await openTunnel(proxyUrl, target.hostname, target.port || 443, options.signal);
+  const socket = await openTunnel(proxyUrl, target.hostname, target.port || "443", options.signal);
   return requestOverSocket(socket, target, options);
 }
 
-export function getProxyDiagnostics() {
+export function getProxyDiagnostics(): { proxy: string | null; auth: string } {
   const proxyUrl = getProxyUrl();
-  const info = { proxy: null, auth: "none" };
+  const info: { proxy: string | null; auth: string } = { proxy: null, auth: "none" };
   if (!proxyUrl) return info;
 
   try {

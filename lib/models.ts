@@ -5,6 +5,8 @@
  * buildProviderModels(): builds ProviderModelConfig[] for pi.registerProvider().
  */
 
+import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+
 // Junie CLI build the list was extracted from: v3659.7 (2026-10-16); all new
 // models verified live against the Grazie backend.
 // Routing by prefix: claude-* → anthropic passthrough, openai-*/grok-* → OpenAI
@@ -22,6 +24,14 @@ const GROK   = { reasoning: true, contextWindow: 500000,  maxTokens: 32768 };
 // the model ID, and a dash-normalised ID would silently fall back to the
 // Gemini 2 budget API.
 const GEMINI = { reasoning: true, contextWindow: 1048576, maxTokens: 65536 };
+
+interface ModelMeta {
+  reasoning: boolean;
+  contextWindow: number;
+  maxTokens: number;
+  /** Name Grazie expects, when it differs from the Pi-facing ID. */
+  upstream?: string;
+}
 
 const MODELS = {
   // Anthropic — passthrough via ingrazzio-cloud-prod /v1/messages
@@ -67,16 +77,20 @@ const MODELS = {
   "gemini-3.7-flash":        GEMINI,
   "gemini-3.8-flash":        GEMINI,
   "gemini-4-argon":          GEMINI,
-};
+} satisfies Record<string, ModelMeta>;
 
-export const KNOWN_GRAZIE_MODELS = Object.keys(MODELS);
+type ModelId = keyof typeof MODELS;
+export type ProviderType = "openai" | "claude" | "grok" | "gemini";
+
+export const KNOWN_GRAZIE_MODELS: string[] = Object.keys(MODELS);
 
 /** The model name Grazie expects for a Pi-facing ID. */
-export function upstreamModelId(id) {
-  return MODELS[id]?.upstream ?? id;
+export function upstreamModelId(id: string): string {
+  const meta: ModelMeta | undefined = MODELS[id as ModelId];
+  return meta?.upstream ?? id;
 }
 
-export function isLegacyModel(id) {
+export function isLegacyModel(id: string): boolean {
   if (/^openai-gpt-?5(-mini|-nano|-codex)?$/.test(id)) return true;
   if (/^openai-gpt-?4/.test(id)) return true;
   if (/^openai-o[1234]/.test(id)) return true;
@@ -96,7 +110,7 @@ const OPENAI_COMPAT = {
 // (minimal|low|medium|high|xhigh|none). Sending `reasoning.effort` is only
 // accepted by the Grazie backend on the OpenAI Responses API (/v1/responses),
 // never on /v1/chat/completions when function tools are present.
-const OPENAI_THINKING_LEVEL_MAP = {
+const OPENAI_THINKING_LEVEL_MAP: Record<string, string> = {
   off:     "none",
   minimal: "minimal",
   low:     "low",
@@ -109,7 +123,7 @@ const OPENAI_THINKING_LEVEL_MAP = {
 // Grok rejects `reasoning_effort: none` ("This model does not support
 // `reasoning_effort` value `none`."), so Pi's "off" maps to the lowest effort
 // the model accepts instead of disabling reasoning.
-const GROK_THINKING_LEVEL_MAP = {
+const GROK_THINKING_LEVEL_MAP: Record<string, string> = {
   ...OPENAI_THINKING_LEVEL_MAP,
   off: "minimal",
 };
@@ -120,7 +134,7 @@ const CLAUDE_COMPAT = {
   supportsLongCacheRetention: false,
 };
 
-const PREFIX_BY_TYPE = {
+const PREFIX_BY_TYPE: Record<ProviderType, string> = {
   claude: "claude-",
   grok:   "grok-",
   gemini: "gemini-",
@@ -133,10 +147,9 @@ const PREFIX_BY_TYPE = {
  * reasoning effort can be combined with function tools; they inherit
  * provider-level baseUrl. Claude and Gemini models get per-model overrides
  * (api + baseUrl), since both speak their own protocol on their own route.
- * @param {"openai" | "claude" | "grok" | "gemini"} type
- * @param {number} [port] — required for claude/gemini (per-model baseUrl override)
+ * @param port — per-model baseUrl override for claude/gemini
  */
-export function buildProviderModels(type, port) {
+export function buildProviderModels(type: ProviderType, port: number): ProviderModelConfig[] {
   const prefix = PREFIX_BY_TYPE[type];
   // Gemini goes through pi-ai's Google client, which ignores the OpenAI/Claude
   // compat flags — leave them off rather than sending misleading ones.
@@ -145,8 +158,8 @@ export function buildProviderModels(type, port) {
   return KNOWN_GRAZIE_MODELS
     .filter((id) => id.startsWith(prefix) && !isLegacyModel(id))
     .map((id) => {
-      const meta = MODELS[id];
-      const model = {
+      const meta = MODELS[id as ModelId];
+      const model: ProviderModelConfig = {
         id,
         name: id + " (Junie)",
         reasoning: meta.reasoning,
@@ -162,7 +175,7 @@ export function buildProviderModels(type, port) {
       } else if (type === "gemini") {
         // pi-ai drives these with the @google/genai SDK, which appends
         // /models/<id>:generateContent to the baseUrl. The bridge rewrites that
-        // onto the Grazie Vertex path (see handleGoogle in server.mjs).
+        // onto the Grazie Vertex path (see handleGoogle in server.ts).
         model.api = "google-generative-ai";
         model.baseUrl = `http://localhost:${port}/google/v1beta`;
       } else {

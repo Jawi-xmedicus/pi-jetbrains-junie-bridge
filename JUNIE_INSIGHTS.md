@@ -286,8 +286,8 @@ bridge:
 1. Registers OpenAI models with `api: "openai-responses"`, `reasoning: true`, and a
    `thinkingLevelMap` mapping Pi's thinking levels to the `ReasoningEffort` values
    (`off → none`, `xhigh`/`max → xhigh`; `minimal/low/medium/high` pass through).
-   See `buildProviderModels` in `lib/models.mjs`.
-2. Adds a `/v1/responses` route (`handleResponses` in `lib/server.mjs`) that forwards
+   See `buildProviderModels` in `lib/models.ts`.
+2. Adds a `/v1/responses` route (`handleResponses` in `lib/server.ts`) that forwards
    to the ingrazzio `/v1/responses` endpoint using the same OpenAI headers. The payload
    is sanitized against `RESPONSES_ALLOWED` (fields Pi sends that the backend doesn't
    understand — e.g. `max_output_tokens`, `service_tier` — are dropped).
@@ -410,7 +410,7 @@ purely a regex match on the assistant message's `errorMessage`, against
 **The bridge needs no special handling here.** Grazie is a pure passthrough for
 these errors: it returns the upstream provider's original error body, and the
 bridge forwards it verbatim in `error.message` (`sendJson(res, upstream.status, …)`
-in every handler in `lib/server.mjs`). So the message Pi sees still contains the
+in every handler in `lib/server.ts`). So the message Pi sees still contains the
 native provider phrasing that Pi already knows.
 
 Verified 2026-07-28 against the live backend, all four families:
@@ -430,7 +430,7 @@ Two things worth remembering:
   400 costs 0 credits — confirmed by reading `/junie/balance` before and after all
   four probes (balance unchanged to the cent). This makes overflow a cheap probing
   tool, not something to avoid.
-- **The declared windows are exact.** The `contextWindow` values in `lib/models.mjs`
+- **The declared windows are exact.** The `contextWindow` values in `lib/models.ts`
   match what the backend enforces (500k Grok, 1M Claude, 1048576 Gemini).
 
 If a future model family *does* get wrapped in a Grazie-specific error envelope,
@@ -445,11 +445,11 @@ When updating to a new Junie CLI version:
 
 1. Download the new release ZIP or extract from npm package
 2. Extract the JAR and run the decompile commands above
-3. Compare model lists — add new models to `KNOWN_GRAZIE_MODELS` and `MODEL_METADATA` in `lib/models.mjs`
-4. For new OpenAI/Grok models, add the ID mapping to `OPENAI_MODEL_MAP` / `GROK_MODEL_MAP` in `lib/server.mjs` (Gemini IDs need no mapping — they are used verbatim)
-5. Update the `Grazie-Agent` version in `lib/server.mjs`
-6. Check if OAuth config or API endpoints changed (unlikely but worth verifying)
-7. Verify OpenAI models still use `api: "openai-responses"` and that `RESPONSES_ALLOWED` (in `lib/server.mjs`) still matches the upstream `CreateResponsePayload` schema
+3. Compare model lists — add new models to the single `MODELS` table in `lib/models.ts`. Set `upstream` for OpenAI/Grok models whose Grazie name differs from the Pi-facing ID (Gemini IDs need no mapping — they are used verbatim)
+4. Update the `Grazie-Agent` version (`GRAZIE_AGENT` in `lib/server.ts`) and the version noted at the top of the table in `lib/models.ts`
+5. Check if OAuth config or API endpoints changed (unlikely but worth verifying)
+6. Verify OpenAI models still use `api: "openai-responses"` and that `RESPONSES_ALLOWED` (in `lib/server.ts`) still matches the upstream `CreateResponsePayload` schema
+7. Run `npm run typecheck`
 
 ## Version History
 

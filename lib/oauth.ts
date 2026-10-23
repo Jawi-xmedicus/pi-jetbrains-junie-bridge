@@ -1,13 +1,14 @@
 /**
  * JetBrains Junie OAuth PKCE flow — adapted for Pi's OAuthLoginCallbacks.
  *
- * Extracted from server.mjs. Instead of printing URLs and opening the browser
+ * Extracted from server.ts. Instead of printing URLs and opening the browser
  * directly, this uses Pi's callbacks (onAuth, signal) so Pi controls the UI.
  */
 
 import { createServer } from "node:http";
 import { randomBytes, createHash } from "node:crypto";
-import { proxyFetch } from "./proxy.mjs";
+import type { ProviderConfig } from "@earendil-works/pi-coding-agent";
+import { proxyFetch } from "./proxy.ts";
 
 const OAUTH = {
   tokenEndpoint: "https://oauth.account.jetbrains.com/oauth2/token",
@@ -18,17 +19,31 @@ const OAUTH = {
   callbackPortEnd: 62364,
 };
 
+/** What the token endpoint returns (only the fields the bridge reads). */
+interface TokenResponse {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+}
+
+// Login/refresh shapes come straight from pi's provider registration contract,
+// so a change there fails the typecheck here. Type-only: erased at runtime.
+type PiOAuth = NonNullable<ProviderConfig["oauth"]>;
+type LoginCallbacks = Parameters<PiOAuth["login"]>[0];
+type OAuthCredentials = Awaited<ReturnType<PiOAuth["login"]>>;
+
 function generatePKCE() {
   const codeVerifier = randomBytes(32).toString("base64url");
   const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
   return { codeVerifier, codeChallenge };
 }
 
-function getJwtExpiresIn(token) {
+function getJwtExpiresIn(token: string): number | undefined {
   try {
     const parts = token.split(".");
-    if (parts.length !== 3) return undefined;
-    let payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const payloadPart = parts[1];
+    if (parts.length !== 3 || payloadPart === undefined) return undefined;
+    let payload = payloadPart.replace(/-/g, "+").replace(/_/g, "/");
     while (payload.length % 4) payload += "=";
     const json = Buffer.from(payload, "base64").toString("utf-8");
     const claims = JSON.parse(json);
@@ -37,12 +52,9 @@ function getJwtExpiresIn(token) {
   } catch { return undefined; }
 }
 
-async function startCallbackServer(signal) {
-  let resolveCallback, rejectCallback;
-  const callbackPromise = new Promise((resolve, reject) => {
-    resolveCallback = resolve;
-    rejectCallback = reject;
-  });
+async function startCallbackServer(signal?: AbortSignal) {
+  const { promise: callbackPromise, resolve: resolveCallback, reject: rejectCallback } =
+    Promise.withResolvers<{ code: string; state: string }>();
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -74,28 +86,28 @@ async function startCallbackServer(signal) {
     }, { once: true });
   }
 
-  const port = await new Promise((resolve, reject) => {
-    let current = OAUTH.callbackPortStart;
-    const tryPort = () => {
-      if (current > OAUTH.callbackPortEnd) {
-        reject(new Error(`Cannot start OAuth callback server on ports ${OAUTH.callbackPortStart}-${OAUTH.callbackPortEnd}`));
-        return;
-      }
-      server.once("error", () => { current++; tryPort(); });
-      server.listen(current, "localhost", () => resolve(current));
-    };
-    tryPort();
-  });
+  const { promise: portReady, resolve: resolvePort, reject: rejectPort } = Promise.withResolvers<number>();
+  let current = OAUTH.callbackPortStart;
+  const tryPort = () => {
+    if (current > OAUTH.callbackPortEnd) {
+      rejectPort(new Error(`Cannot start OAuth callback server on ports ${OAUTH.callbackPortStart}-${OAUTH.callbackPortEnd}`));
+      return;
+    }
+    server.once("error", () => { current++; tryPort(); });
+    server.listen(current, "localhost", () => resolvePort(current));
+  };
+  tryPort();
+  const port = await portReady;
 
   return { server, port, waitForCallback: () => callbackPromise };
 }
 
-function buildAuthUrl(port, codeChallenge, authState) {
+function buildAuthUrl(port: number, codeChallenge: string, authState: string): string {
   const redirectUri = `http://localhost:${port}`;
   return `${OAUTH.loginInitialUrl}?client_id=${OAUTH.clientId}&scope=${encodeURIComponent(OAUTH.scopes)}&state=${authState}&code_challenge=${codeChallenge}&redirect_uri=${encodeURIComponent(redirectUri)}`;
 }
 
-async function exchangeCodeForToken(code, codeVerifier, redirectUri) {
+async function exchangeCodeForToken(code: string, codeVerifier: string, redirectUri: string): Promise<TokenResponse> {
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
@@ -109,15 +121,11 @@ async function exchangeCodeForToken(code, codeVerifier, redirectUri) {
     body,
   });
   if (!res.ok) throw new Error(`Token exchange failed: ${res.status} ${await res.text()}`);
-  return res.json();
+  return (await res.json()) as TokenResponse;
 }
 
-/**
- * Pi-compatible OAuth login function.
- * @param {import("@earendil-works/pi-ai").OAuthLoginCallbacks} callbacks
- * @returns {Promise<import("@earendil-works/pi-ai").OAuthCredentials>}
- */
-export async function junieLogin(callbacks) {
+/** Pi-compatible OAuth login function. */
+export async function junieLogin(callbacks: LoginCallbacks): Promise<OAuthCredentials> {
   const pkce = generatePKCE();
   const authState = randomBytes(16).toString("hex");
   const { server, port, waitForCallback } = await startCallbackServer(callbacks.signal);
@@ -140,6 +148,8 @@ export async function junieLogin(callbacks) {
       ? Date.now() + expiresIn * 1000 - 60 * 1000 // 60s safety margin
       : Date.now() + 3600 * 1000; // fallback 1h
 
+    if (!tokenResponse.refresh_token) throw new Error("Token response contained no refresh_token");
+
     return {
       access: tokenResponse.access_token,
       refresh: tokenResponse.refresh_token,
@@ -150,12 +160,8 @@ export async function junieLogin(callbacks) {
   }
 }
 
-/**
- * Pi-compatible OAuth token refresh function.
- * @param {import("@earendil-works/pi-ai").OAuthCredentials} credentials
- * @returns {Promise<import("@earendil-works/pi-ai").OAuthCredentials>}
- */
-export async function junieRefreshToken(credentials) {
+/** Pi-compatible OAuth token refresh function. */
+export async function junieRefreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: credentials.refresh,
@@ -168,7 +174,7 @@ export async function junieRefreshToken(credentials) {
   });
   if (!res.ok) throw new Error(`Token refresh failed: ${res.status} ${await res.text()}`);
 
-  const data = await res.json();
+  const data = (await res.json()) as TokenResponse;
 
   let expiresIn = data.expires_in;
   if (!expiresIn && data.access_token) {

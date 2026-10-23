@@ -1,4 +1,4 @@
-name: Release & Publish
+name: Release
 
 on:
   push:
@@ -13,6 +13,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - run: npm ci
+
+      - name: Tag must match package.json version
+        run: test "v$(node -p "require('./package.json').version")" = "${{ github.ref_name }}"
+
+      - run: npm run typecheck
+      - run: npm test
 
       - name: Create GitHub Release
         run: gh release create "${{ github.ref_name }}" --generate-notes
