@@ -8,7 +8,7 @@ import type {
 import { createRequire } from "node:module";
 import { startServer } from "./lib/server.mjs";
 import { junieLogin, junieRefreshToken } from "./lib/oauth.mjs";
-import { buildProviderModels, cleanOldModelsJson } from "./lib/models.mjs";
+import { buildProviderModels } from "./lib/models.mjs";
 import { getProxyDiagnostics } from "./lib/proxy.mjs";
 
 const require = createRequire(import.meta.url);
@@ -176,9 +176,6 @@ function renderReportLine(raw: string, width: number, theme: Theme): string[] {
 }
 
 export default async function (pi: ExtensionAPI) {
-  // Clean stale provider entries from ~/.pi/agent/models.json (left by old pi-junie setup)
-  await cleanOldModelsJson();
-
   // Start proxy on ephemeral port (OS assigns a free port)
   const { server, port } = await startServer();
 

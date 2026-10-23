@@ -20,12 +20,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sschatter/pi-jetbrains-junie-bridge.git"
+    "url": "git+https://github.com/Jawi-xmedicus/pi-jetbrains-junie-bridge.git"
   },
   "bugs": {
-    "url": "https://github.com/sschatter/pi-jetbrains-junie-bridge/issues"
+    "url": "https://github.com/Jawi-xmedicus/pi-jetbrains-junie-bridge/issues"
   },
-  "homepage": "https://github.com/sschatter/pi-jetbrains-junie-bridge#readme",
+  "homepage": "https://github.com/Jawi-xmedicus/pi-jetbrains-junie-bridge#readme",
   "engines": {
     "node": ">=20"
   },

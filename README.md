@@ -42,6 +42,7 @@ It is extracted from the Junie CLI release **26.10.12 (build 3659.7)**.
 - `claude-opus-5-5`
 - `claude-sonnet-5-5`
 - `claude-haiku-5-5`
+- `claude-haiku-5`
 - `claude-fable-5`
 - `claude-fable-5-1`
 
