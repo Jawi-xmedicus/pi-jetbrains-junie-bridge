@@ -33,9 +33,15 @@ type Payload = JsonObject & { model: string };
 const GOOGLE_PROJECT = "jetbrains-grazie";
 
 // ─── Headers ─────────────────────────────────────────────────────────────────
+// Without X-Accept-EAP-License: false, Grazie picks JUNP (USD, EAP) over
+// AIP/AIPU (CREDITS) on /auth/test and QuotaAPI, so the balance would show a
+// different bucket than chat consumes.
+export function grazieUserHeaders(auth: string, extra: Record<string, string> = {}): Record<string, string> {
+  return { "Authorization": auth, "X-Accept-EAP-License": "false", ...extra };
+}
+
 function openaiHeaders(authHeader: string): Record<string, string> {
-  const h: Record<string, string> = {
-    "Authorization": authHeader,
+  const h = grazieUserHeaders(authHeader, {
     "Content-Type": "application/json",
     "Accept": "text/event-stream,application/json",
     "Accept-Encoding": "identity",
@@ -43,8 +49,7 @@ function openaiHeaders(authHeader: string): Record<string, string> {
     "X-LLM-Model": "openai",
     "X-Keep-Path": "true",
     "Openai-Version": "2020-11-07",
-    "X-Accept-EAP-License": "false",
-  };
+  });
   if (state.freeGoogleApi) h["X-Free-Google-Api"] = "true";
   return h;
 }
@@ -61,8 +66,7 @@ function googleHeaders(authHeader: string): Record<string, string> {
 }
 
 function anthropicHeaders(authHeader: string): Record<string, string> {
-  const h: Record<string, string> = {
-    "Authorization": authHeader,
+  const h = grazieUserHeaders(authHeader, {
     "Content-Type": "application/json",
     "Accept": "text/event-stream,application/json",
     "Accept-Encoding": "identity",
@@ -70,8 +74,7 @@ function anthropicHeaders(authHeader: string): Record<string, string> {
     "X-LLM-Model": "anthropic",
     "X-Keep-Path": "true",
     "Openai-Version": "2020-11-07",
-    "X-Accept-EAP-License": "false",
-  };
+  });
   if (state.freeGoogleApi) h["X-Free-Google-Api"] = "true";
   return h;
 }
@@ -564,7 +567,7 @@ export interface BalanceResponse {
 async function grazieQuotaPost<T>(auth: string, path: string): Promise<T> {
   const upstream = await proxyFetch(`${GRAZIE_AUTH_BASE}${path}`, {
     method: "POST",
-    headers: { "Authorization": auth, "Content-Type": "application/json" },
+    headers: grazieUserHeaders(auth, { "Content-Type": "application/json" }),
     body: "{}",
     signal: AbortSignal.timeout(BALANCE_TIMEOUT_MS),
   });
@@ -628,7 +631,7 @@ async function handleBalance(req: IncomingMessage, res: ServerResponse): Promise
     // for /auth/test first would make /junie feel sluggish.
     const [test, quota, refill] = await Promise.all([
       proxyFetch(`${GRAZIE_AUTH_BASE}/auth/test`, {
-        headers: { "Authorization": auth },
+        headers: grazieUserHeaders(auth),
         signal: AbortSignal.timeout(BALANCE_TIMEOUT_MS),
       }),
       grazieQuotaPost<GrazieQuotaResponse>(auth, "/user/v5/quota/get").catch(() => undefined),

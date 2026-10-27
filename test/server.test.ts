@@ -213,6 +213,23 @@ describe("shared server", () => {
   });
 });
 
+describe("balance", () => {
+  it("asks Grazie for the non-EAP bucket on /auth/test and every quota call", async () => {
+    calls = [];
+    upstream = async () => jsonResponse(200, { active: true, balanceLeft: 1, balanceUnit: "CREDITS" });
+    const res = await rawRequest("/junie/balance");
+    assert.equal(res.status, 200);
+
+    const authTest = calls.filter((c) => c.url.endsWith("/auth/test"));
+    const quota = calls.filter((c) => c.url.includes("/quota/"));
+    assert.equal(authTest.length, 1);
+    assert.equal(quota.length, 2);
+    for (const c of [...authTest, ...quota]) {
+      assert.equal(c.headers["X-Accept-EAP-License"], "false", c.url);
+    }
+  });
+});
+
 // Kept last: this permanently flips the bridge's X-Free-Google-Api state.
 describe("477 from Grazie", () => {
   it("drops X-Free-Google-Api and repeats the request once, transparently", async () => {

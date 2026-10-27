@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  CLAUDE_THINKING_LEVEL_MAP,
   KNOWN_GRAZIE_MODELS,
   buildProviderModels,
   isLegacyModel,
@@ -67,5 +68,24 @@ describe("provider model routing", () => {
     // Grok rejects reasoning effort "none".
     assert.equal(buildProviderModels("grok", PORT)[0]?.thinkingLevelMap?.off, "minimal");
     assert.equal(buildProviderModels("openai", PORT)[0]?.thinkingLevelMap?.off, "none");
+  });
+
+  it("gives every Claude model a thinking level map", () => {
+    for (const m of buildProviderModels("claude", PORT)) {
+      assert.ok(m.id in CLAUDE_THINKING_LEVEL_MAP, m.id);
+      assert.deepEqual(m.thinkingLevelMap, CLAUDE_THINKING_LEVEL_MAP[m.id as keyof typeof CLAUDE_THINKING_LEVEL_MAP]);
+    }
+  });
+
+  it("cannot disable thinking on Fable models", () => {
+    for (const id of ["claude-fable-5", "claude-fable-5-1"] as const) {
+      assert.equal(CLAUDE_THINKING_LEVEL_MAP[id].off, null);
+    }
+  });
+
+  it("exposes max but not xhigh on Sonnet 4.6", () => {
+    const map = CLAUDE_THINKING_LEVEL_MAP["claude-sonnet-4-6"];
+    assert.equal(map.max, "max");
+    assert.equal("xhigh" in map, false);
   });
 });

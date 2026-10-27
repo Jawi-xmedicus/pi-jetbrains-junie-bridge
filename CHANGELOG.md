@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- `/junie` and the status line could show a different licence than chat consumes. `/auth/test` and the QuotaAPI calls now send `X-Accept-EAP-License: false` like chat does; without it Grazie prefers `JUNP` (USD, EAP) over `AIP`/`AIPU` (credits). Port of upstream PR #6.
+- Claude models: Pi's thinking slider clamped `xhigh`/`max` to `high`, and `off` on Fable models answered 400. Claude models now declare a per-model `thinkingLevelMap` (slider → Anthropic `output_config.effort`; thinking stays adaptive). Port of upstream PR #6.
+
 ## 1.5.0
 
 Fork of [sschatter/pi-jetbrains-junie-bridge](https://github.com/sschatter/pi-jetbrains-junie-bridge), maintained at [Jawi-xmedicus/pi-jetbrains-junie-bridge](https://github.com/Jawi-xmedicus/pi-jetbrains-junie-bridge). Distributed from GitHub only (not published to npm).

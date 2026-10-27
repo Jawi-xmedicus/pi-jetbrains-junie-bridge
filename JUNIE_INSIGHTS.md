@@ -193,6 +193,11 @@ Things that are easy to get wrong here:
   AIPU licence with zero top-ups). The bridge therefore prefers the QuotaAPI's
   `tariff.available + topUp.available` and only falls back to `balanceLeft`.
 - `licenseType` exists **only** on `/auth/test`, so both calls are needed.
+- **`X-Accept-EAP-License: false` must be sent on `/auth/test` and the QuotaAPI too**,
+  not only on chat. Without it Grazie prefers `JUNP` (USD, EAP-style) over
+  `AIP`/`AIPU` (CREDITS), so the status line shows a different bucket than chat
+  consumes. `JUNP` also makes the QuotaAPI answer 400, so the display falls back
+  to the `/auth/test` USD figure.
 - **Accounts without an active licence have no quota at all**: `/auth/test` reports
   `{"balanceLeft": 5.0, "balanceUnit": "USD", "licenseType": "TRIAL"}` (note the unit
   is `USD`, not `CREDITS`) and every `/user/v5/quota/…` call answers `400` with an

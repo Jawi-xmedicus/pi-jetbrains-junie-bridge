@@ -128,6 +128,31 @@ const GROK_THINKING_LEVEL_MAP: Record<string, string> = {
   off: "minimal",
 };
 
+// Anthropic separates thinking (adaptive here, via forceAdaptiveThinking) from
+// output_config.effort. Pi's single thinking slider maps onto effort. Pi hides
+// xhigh/max unless they are present in thinkingLevelMap (otherwise it clamps to
+// high), so each model lists exactly the extra levels it accepts. Fable cannot
+// disable thinking (off -> HTTP 400), so its "off" is null (unsupported).
+// Keyed by every Claude model id in MODELS: a missing id is a type error.
+type ClaudeModelId = Extract<ModelId, `claude-${string}`>;
+const XHIGH_MAX = { xhigh: "xhigh", max: "max" } as const;
+const MAX_ONLY = { max: "max" } as const;
+const FABLE = { off: null, ...XHIGH_MAX } as const;
+export const CLAUDE_THINKING_LEVEL_MAP: Record<ClaudeModelId, NonNullable<ProviderModelConfig["thinkingLevelMap"]>> = {
+  "claude-sonnet-4-6": MAX_ONLY,
+  "claude-sonnet-5":   XHIGH_MAX,
+  "claude-sonnet-5-5": XHIGH_MAX,
+  "claude-haiku-5-5":  {},
+  "claude-haiku-5":    {},
+  "claude-opus-4-6":   MAX_ONLY,
+  "claude-opus-4-7":   XHIGH_MAX,
+  "claude-opus-4-8":   XHIGH_MAX,
+  "claude-opus-5":     XHIGH_MAX,
+  "claude-opus-5-5":   XHIGH_MAX,
+  "claude-fable-5":    FABLE,
+  "claude-fable-5-1":  FABLE,
+};
+
 const CLAUDE_COMPAT = {
   forceAdaptiveThinking: true,
   supportsEagerToolInputStreaming: false,
@@ -172,6 +197,7 @@ export function buildProviderModels(type: ProviderType, port: number): ProviderM
       if (type === "claude") {
         model.api = "anthropic-messages";
         model.baseUrl = `http://localhost:${port}`;
+        model.thinkingLevelMap = CLAUDE_THINKING_LEVEL_MAP[id as ClaudeModelId];
       } else if (type === "gemini") {
         // pi-ai drives these with the @google/genai SDK, which appends
         // /models/<id>:generateContent to the baseUrl. The bridge rewrites that
