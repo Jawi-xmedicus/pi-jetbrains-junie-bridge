@@ -17,7 +17,13 @@ const OAUTH = {
   scopes: "offline_access openid jb-authn-service",
   callbackPortStart: 62345,
   callbackPortEnd: 62364,
+  tokenTimeoutMs: 15_000,
 };
+
+function withTimeout(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(OAUTH.tokenTimeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
 
 /** What the token endpoint returns (only the fields the bridge reads). */
 interface TokenResponse {
@@ -57,6 +63,8 @@ async function startCallbackServer(signal?: AbortSignal) {
 
   const { promise: callbackPromise, resolve: resolveCallback, reject: rejectCallback } =
     Promise.withResolvers<{ code: string; state: string }>();
+  // Avoid an unhandled rejection if `signal` aborts before waitForCallback() is awaited.
+  callbackPromise.catch(() => {});
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -80,16 +88,16 @@ async function startCallbackServer(signal?: AbortSignal) {
     res.end();
   });
 
-  // Respect abort signal
-  if (signal) {
-    signal.addEventListener("abort", () => {
-      rejectCallback(new Error("Login aborted"));
-      server.close();
-      server.closeAllConnections?.();
-    }, { once: true });
-  }
-
   const { promise: portReady, resolve: resolvePort, reject: rejectPort } = Promise.withResolvers<number>();
+
+  const onAbort = () => {
+    const err = new Error("Login aborted");
+    rejectPort(err);
+    rejectCallback(err);
+    server.close();
+    server.closeAllConnections?.();
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
   let current = OAUTH.callbackPortStart;
   const onError = () => {
     current++;
@@ -108,9 +116,18 @@ async function startCallbackServer(signal?: AbortSignal) {
     server.listen(current, "localhost");
   };
   tryPort();
-  const port = await portReady;
-
-  return { server, port, waitForCallback: () => callbackPromise };
+  try {
+    const port = await portReady;
+    const close = () => {
+      signal?.removeEventListener("abort", onAbort);
+      server.close();
+      server.closeAllConnections?.();
+    };
+    return { port, close, waitForCallback: () => callbackPromise };
+  } catch (e) {
+    signal?.removeEventListener("abort", onAbort);
+    throw e;
+  }
 }
 
 function buildAuthUrl(port: number, codeChallenge: string, authState: string): string {
@@ -118,7 +135,12 @@ function buildAuthUrl(port: number, codeChallenge: string, authState: string): s
   return `${OAUTH.loginInitialUrl}?client_id=${OAUTH.clientId}&scope=${encodeURIComponent(OAUTH.scopes)}&state=${authState}&code_challenge=${codeChallenge}&redirect_uri=${encodeURIComponent(redirectUri)}`;
 }
 
-async function exchangeCodeForToken(code: string, codeVerifier: string, redirectUri: string): Promise<TokenResponse> {
+async function exchangeCodeForToken(
+  code: string,
+  codeVerifier: string,
+  redirectUri: string,
+  signal?: AbortSignal,
+): Promise<TokenResponse> {
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
@@ -130,6 +152,7 @@ async function exchangeCodeForToken(code: string, codeVerifier: string, redirect
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
+    signal: withTimeout(signal),
   });
   if (!res.ok) throw new Error(`Token exchange failed: ${res.status} ${await res.text()}`);
   return (await res.json()) as TokenResponse;
@@ -139,7 +162,7 @@ async function exchangeCodeForToken(code: string, codeVerifier: string, redirect
 export async function junieLogin(callbacks: LoginCallbacks): Promise<OAuthCredentials> {
   const pkce = generatePKCE();
   const authState = randomBytes(16).toString("hex");
-  const { server, port, waitForCallback } = await startCallbackServer(callbacks.signal);
+  const { port, close, waitForCallback } = await startCallbackServer(callbacks.signal);
   const redirectUri = `http://localhost:${port}`;
   const authUrl = buildAuthUrl(port, pkce.codeChallenge, authState);
   try {
@@ -149,7 +172,7 @@ export async function junieLogin(callbacks: LoginCallbacks): Promise<OAuthCreden
     const callback = await waitForCallback();
     if (callback.state !== authState) throw new Error("OAuth state mismatch");
 
-    const tokenResponse = await exchangeCodeForToken(callback.code, pkce.codeVerifier, redirectUri);
+    const tokenResponse = await exchangeCodeForToken(callback.code, pkce.codeVerifier, redirectUri, callbacks.signal);
 
     let expiresIn = tokenResponse.expires_in;
     if (!expiresIn && tokenResponse.access_token) {
@@ -167,13 +190,12 @@ export async function junieLogin(callbacks: LoginCallbacks): Promise<OAuthCreden
       expires: expiresMs,
     };
   } finally {
-    server.close();
-    server.closeAllConnections?.();
+    close();
   }
 }
 
 /** Pi-compatible OAuth token refresh function. */
-export async function junieRefreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+export async function junieRefreshToken(credentials: OAuthCredentials, signal?: AbortSignal): Promise<OAuthCredentials> {
   const body = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: credentials.refresh,
@@ -183,6 +205,7 @@ export async function junieRefreshToken(credentials: OAuthCredentials): Promise<
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
+    signal: withTimeout(signal),
   });
   if (!res.ok) throw new Error(`Token refresh failed: ${res.status} ${await res.text()}`);
 

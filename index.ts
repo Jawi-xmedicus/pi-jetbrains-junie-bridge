@@ -6,7 +6,7 @@ import type {
   ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import { createRequire } from "node:module";
-import { acquireServer } from "./lib/server.ts";
+import { acquireServer, state } from "./lib/server.ts";
 import type { BalanceResponse, ConnTestResult, ModelsResponse } from "./lib/server.ts";
 import { junieLogin, junieRefreshToken } from "./lib/oauth.ts";
 import { buildProviderModels } from "./lib/models.ts";
@@ -29,8 +29,19 @@ function styleSpan({ text, color, bold, italic }: Span, theme: Theme): string {
 
 /** Word-wrap styled spans, keeping each word's style intact. */
 function wrapSpans(spans: Span[], width: number, indent: string, theme: Theme): string[] {
+  const maxWord = Math.max(1, width);
   const words = spans.flatMap((span) =>
-    span.text.split(/\s+/).filter(Boolean).map((text) => ({ ...span, text })),
+    span.text
+      .split(/\s+/)
+      .filter(Boolean)
+      .flatMap((word) => {
+        if (word.length <= maxWord) return [{ ...span, text: word }];
+        const chunks: Span[] = [];
+        for (let i = 0; i < word.length; i += maxWord) {
+          chunks.push({ ...span, text: word.slice(i, i + maxWord) });
+        }
+        return chunks;
+      }),
   );
 
   const lines: string[] = [];
@@ -152,7 +163,7 @@ function renderReportLine(raw: string, width: number, theme: Theme): string[] {
   if (!plain.trim()) return [""];
 
   const indent = plain.startsWith("- ") ? "   " : " ";
-  const available = width - indent.length - 2;
+  const available = Math.max(1, width - indent.length - 2);
 
   // Hint text: "*…*"
   if (/^\*[^*].*\*$/.test(plain)) {
@@ -197,12 +208,12 @@ export default async function (pi: ExtensionAPI) {
     getApiKey: (cred: { access: string }) => cred.access,
   };
 
-  // Single provider — OpenAI models inherit provider-level api/baseUrl,
-  // Claude models override per-model (api + baseUrl).
+  // Single provider — OpenAI/Grok models inherit provider-level api/baseUrl,
+  // Claude and Gemini models override per-model (api + baseUrl).
   pi.registerProvider("junie", {
     name: "JetBrains Junie",
     baseUrl: `http://localhost:${port}/v1`,
-    api: "openai-completions",
+    api: "openai-responses",
     authHeader: true,
     oauth,
     models: [
@@ -212,9 +223,6 @@ export default async function (pi: ExtensionAPI) {
       ...buildProviderModels("gemini", port),
     ],
   });
-
-  // Balance tracking after each turn
-  let startBalance: number | undefined;
 
   // 100,000 Grazie credits = 1 USD (from ai.grazie.utils.mpp.money.Credit.CREDITS_IN_DOLLAR)
   const CREDITS_PER_USD = 100_000;
@@ -271,8 +279,8 @@ export default async function (pi: ExtensionAPI) {
   }
 
   function applyBalanceStatus(ctx: ExtensionContext, { balanceLeft, balanceUnit }: BalanceSnapshot) {
-    startBalance ??= balanceLeft;
-    const used = Math.max(0, startBalance - balanceLeft);
+    state.startBalance ??= balanceLeft;
+    const used = Math.max(0, state.startBalance - balanceLeft);
     const money = makeAmountFormatter(balanceUnit);
     ctx.ui.setStatus(
       "junie",
@@ -306,8 +314,9 @@ export default async function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", (event, ctx) => {
+    if (!ctx.hasUI) return;
     // "this session" is a per-session delta, so a different session starts over
-    if (event.reason !== "startup" && event.reason !== "reload") startBalance = undefined;
+    if (event.reason !== "startup" && event.reason !== "reload") state.startBalance = undefined;
     void syncStatus(ctx);
   });
 
@@ -364,7 +373,7 @@ export default async function (pi: ExtensionAPI) {
 
       return {
         render(width: number) {
-          const inner = Math.max(20, width - 2);
+          const inner = Math.max(1, width - 2);
           const body = report.markdown.split("\n").flatMap((raw) => renderReportLine(raw, inner, theme));
 
           viewport = Math.max(5, (process.stdout.rows ?? 24) - 10);
@@ -376,7 +385,7 @@ export default async function (pi: ExtensionAPI) {
             ? ` ↑/↓/PgUp/PgDn to scroll (${offset + 1}-${Math.min(offset + viewport, body.length)} of ${body.length}) · q/Enter/Esc to close`
             : " Press q, Enter or Esc to close";
 
-          return [rule, ...body.slice(offset, offset + viewport), theme.fg("dim", hint), rule];
+          return [rule, ...body.slice(offset, offset + viewport), theme.fg("dim", hint.slice(0, width)), rule];
         },
         invalidate() {},
         handleInput(data: string) {
@@ -451,8 +460,8 @@ export default async function (pi: ExtensionAPI) {
           lines.push(`- Top-up: ${money(quota.topUp.available)} of ${money(quota.topUp.maximum)}`);
         }
 
-        if (startBalance != null) {
-          lines.push(`**Session usage:** −${money(Math.max(0, startBalance - balanceInfo.balanceLeft))}`);
+        if (state.startBalance != null) {
+          lines.push(`**Session usage:** −${money(Math.max(0, state.startBalance - balanceInfo.balanceLeft))}`);
         }
 
         if (balanceInfo.licenseType) {

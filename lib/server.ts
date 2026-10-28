@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { promises as dns } from "node:dns";
-import { KNOWN_GRAZIE_MODELS, isLegacyModel, upstreamModelId } from "./models.ts";
+import { KNOWN_GRAZIE_MODELS, upstreamModelId } from "./models.ts";
 import { proxyFetch, getProxyDiagnostics } from "./proxy.ts";
 
 // ─── Upstream Config ─────────────────────────────────────────────────────────
@@ -17,11 +17,21 @@ const GRAZIE_AGENT = JSON.stringify({ name: "junie:cli", version: "3659.7" });
 
 const LOOPBACK_HOST_RE = /^(localhost|127\.0\.0\.1)(:\d+)?$/;
 
-// ─── Proxy State (non-auth) ─────────────────────────────────────────────────
-const state: { freeGoogleApi: boolean; lastAuthHeader: string | undefined } = {
+// ─── Proxy State (process-wide, survives /reload and session switches) ──────
+const STATE = Symbol.for("pi-jetbrains-junie-bridge.state");
+
+export interface BridgeState {
+  freeGoogleApi: boolean;
+  lastAuthHeader: string | undefined;
+  startBalance: number | undefined;
+}
+
+const globalState = globalThis as unknown as Record<symbol, BridgeState | undefined>;
+export const state: BridgeState = (globalState[STATE] ??= {
   freeGoogleApi: true,
   lastAuthHeader: undefined, // cached from last chat request for /junie/balance
-};
+  startBalance: undefined,   // per-session starting balance; survives /reload
+});
 
 type JsonObject = Record<string, unknown>;
 /** A request body Pi sends to the proxy — only `model` is inspected before sanitizing. */
@@ -292,6 +302,9 @@ async function pipeSSE(upstreamRes: Response, res: ServerResponse): Promise<void
         res.once("drain", onDrained);
         res.once("close", onDrained);
         await drained;
+        res.off("drain", onDrained);
+        res.off("close", onDrained);
+        if (res.destroyed || res.writableEnded) break;
       }
     }
   } catch (e) {
@@ -497,14 +510,12 @@ export interface ModelsResponse {
 }
 
 function handleModels(_req: IncomingMessage, res: ServerResponse): void {
-  const models = KNOWN_GRAZIE_MODELS
-    .filter((id) => !isLegacyModel(id))
-    .map((id) => ({
-      id,
-      object: "model" as const,
-      created: 0,
-      owned_by: id.split("-")[0] ?? id,
-    }));
+  const models = KNOWN_GRAZIE_MODELS.map((id) => ({
+    id,
+    object: "model" as const,
+    created: 0,
+    owned_by: id.split("-")[0] ?? id,
+  }));
   const body: ModelsResponse = { object: "list", data: models };
   sendJson(res, 200, body);
 }
@@ -765,6 +776,10 @@ async function startServer(): Promise<StartedServer> {
   const { promise: listening, resolve: onListening, reject: onListenError } = Promise.withResolvers<number>();
   server.once("error", onListenError);
   server.listen(0, "127.0.0.1", () => {
+    server.off("error", onListenError);
+    // Subagent sessions are disposed without emitting session_shutdown, so their
+    // lease is never released; unref ensures the proxy never blocks process exit.
+    server.unref();
     const address = server.address();
     if (address === null || typeof address === "string") {
       onListenError(new Error("Proxy server has no TCP address"));

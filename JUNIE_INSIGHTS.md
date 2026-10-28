@@ -107,7 +107,7 @@ Notes:
   an empty 404. Only `/v1/responses` works, with the same OpenAI payload as the
   GPT models. Streaming, function tools, reasoning summaries and image input all
   work; `reasoning_effort: "none"` is rejected (`This model does not support
-  reasoning_effort value none`), so map Pi's "off" to `minimal`.
+  reasoning_effort value none`), so Pi's `off` is set to `null` (unsupported).
 - **Google** works despite the older claim in this file that it can't. The
   earlier attempts failed because they used an OpenAI-shaped path; the real path
   is the Vertex-style one above. The project segment defaults to

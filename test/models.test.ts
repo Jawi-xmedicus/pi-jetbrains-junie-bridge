@@ -4,7 +4,6 @@ import {
   CLAUDE_THINKING_LEVEL_MAP,
   KNOWN_GRAZIE_MODELS,
   buildProviderModels,
-  isLegacyModel,
   upstreamModelId,
   type ProviderType,
 } from "../lib/models.ts";
@@ -33,10 +32,9 @@ describe("model table", () => {
     assert.equal(upstreamModelId("not-a-model"), "not-a-model");
   });
 
-  it("registers each non-legacy model exactly once across the four families", () => {
+  it("registers each model in MODELS exactly once across the four families", () => {
     const registered = TYPES.flatMap((t) => buildProviderModels(t, PORT).map((m) => m.id));
-    const expected = KNOWN_GRAZIE_MODELS.filter((id) => !isLegacyModel(id));
-    assert.deepEqual([...registered].sort(), [...expected].sort());
+    assert.deepEqual([...registered].sort(), [...KNOWN_GRAZIE_MODELS].sort());
   });
 });
 
@@ -64,10 +62,14 @@ describe("provider model routing", () => {
     }
   });
 
-  it("maps Pi's 'off' to the lowest effort Grok accepts, but to 'none' for OpenAI", () => {
-    // Grok rejects reasoning effort "none".
-    assert.equal(buildProviderModels("grok", PORT)[0]?.thinkingLevelMap?.off, "minimal");
-    assert.equal(buildProviderModels("openai", PORT)[0]?.thinkingLevelMap?.off, "none");
+  it("disables 'off' on Grok, gpt-6-astra, and gpt-6-1-sol, and maps 'off' to 'none' on other OpenAI models", () => {
+    for (const m of buildProviderModels("grok", PORT)) {
+      assert.equal(m.thinkingLevelMap?.off, null, m.id);
+    }
+    for (const m of buildProviderModels("openai", PORT)) {
+      const expected = m.id === "openai-gpt-6-astra" || m.id === "openai-gpt-6-1-sol" ? null : "none";
+      assert.equal(m.thinkingLevelMap?.off, expected, m.id);
+    }
   });
 
   it("gives every Claude model a thinking level map", () => {
@@ -77,9 +79,9 @@ describe("provider model routing", () => {
     }
   });
 
-  it("cannot disable thinking on Fable models", () => {
-    for (const id of ["claude-fable-5", "claude-fable-5-1"] as const) {
-      assert.equal(CLAUDE_THINKING_LEVEL_MAP[id].off, null);
+  it("cannot disable thinking on Fable and Claude 5.5 Opus/Sonnet models", () => {
+    for (const id of ["claude-fable-5", "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"] as const) {
+      assert.equal(CLAUDE_THINKING_LEVEL_MAP[id].off, null, id);
     }
   });
 

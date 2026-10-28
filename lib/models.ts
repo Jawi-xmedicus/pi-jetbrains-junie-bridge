@@ -30,6 +30,28 @@ const GEMINI_LEVELS = { off: null, minimal: null, low: "low", medium: "medium", 
 const GEMINI = { reasoning: true, contextWindow: 1048576, maxTokens: 65536, thinkingLevelMap: GEMINI_LEVELS };
 const GEMINI_MINIMAL = { ...GEMINI, thinkingLevelMap: { ...GEMINI_LEVELS, minimal: "minimal" } };
 
+// Maps Pi's thinking levels to the Grazie/OpenAI ReasoningEffort enum values
+// (minimal|low|medium|high|xhigh|none). Sending `reasoning.effort` is only
+// accepted by the Grazie backend on the OpenAI Responses API (/v1/responses),
+// never on /v1/chat/completions when function tools are present.
+const OPENAI_THINKING_LEVEL_MAP = {
+  off:     "none",
+  minimal: "minimal",
+  low:     "low",
+  medium:  "medium",
+  high:    "high",
+  xhigh:   "xhigh",
+  max:     "xhigh",
+} as const;
+
+// Grok, gpt-6-astra, and gpt-6.1-sol reject `reasoning.effort: "none"`, so "off"
+// is null (unsupported) — Pi hides it in the slider and clamps to the lowest
+// supported level while keeping reasoning summaries and encrypted content enabled.
+const GROK_THINKING_LEVEL_MAP = {
+  ...OPENAI_THINKING_LEVEL_MAP,
+  off: null,
+} as const;
+
 interface ModelMeta {
   reasoning: boolean;
   contextWindow: number;
@@ -45,7 +67,7 @@ const MODELS = {
   "claude-sonnet-4-6":    CLAUDE,
   "claude-sonnet-5":      CLAUDE,
   "claude-sonnet-5-5":    CLAUDE,
-  "claude-haiku-5-5":     { ...CLAUDE, maxTokens: 64000 },
+  "claude-haiku-5-5":     CLAUDE,
   "claude-haiku-5":       CLAUDE,
   "claude-opus-4-6":      CLAUDE,
   "claude-opus-4-7":      CLAUDE,
@@ -62,10 +84,10 @@ const MODELS = {
   "openai-gpt-5-6-luna":  { ...OPENAI, upstream: "gpt-5.6-luna" },
   "openai-gpt-5-6-terra": { ...OPENAI, upstream: "gpt-5.6-terra" },
   "openai-gpt-5-6-sol":   { ...OPENAI, upstream: "gpt-5.6-sol" },
-  "openai-gpt-6-astra":   { ...OPENAI, upstream: "gpt-6-astra" },
+  "openai-gpt-6-astra":   { ...OPENAI, upstream: "gpt-6-astra", thinkingLevelMap: GROK_THINKING_LEVEL_MAP },
   "openai-gpt-6-luna":    { ...OPENAI, upstream: "gpt-6-luna" },
   "openai-gpt-6-sol":     { ...OPENAI, upstream: "gpt-6-sol" },
-  "openai-gpt-6-1-sol":   { ...OPENAI, upstream: "gpt-6.1-sol" },
+  "openai-gpt-6-1-sol":   { ...OPENAI, upstream: "gpt-6.1-sol", thinkingLevelMap: GROK_THINKING_LEVEL_MAP },
 
   // xAI — passthrough via ingrazzio-cloud-prod /v1/responses with X-LLM-Model: grok
   "grok-4-3":             { ...GROK, upstream: "grok-4.3", contextWindow: 1000000 },
@@ -97,49 +119,17 @@ export function upstreamModelId(id: string): string {
   return meta?.upstream ?? id;
 }
 
-export function isLegacyModel(id: string): boolean {
-  if (/^openai-gpt-?5(-mini|-nano|-codex)?$/.test(id)) return true;
-  if (/^openai-gpt-?4/.test(id)) return true;
-  if (/^openai-o[1234]/.test(id)) return true;
-  if (/^claude-(sonnet|opus)-4-0/.test(id)) return true;
-  if (/^claude-3-/.test(id)) return true;
-  return false;
-}
-
 // Compat flags per provider type
 const OPENAI_COMPAT = {
   supportsDeveloperRole: false,
-  supportsReasoningEffort: true,
-  supportsUsageInStreaming: false,
-};
-
-// Maps Pi's thinking levels to the Grazie/OpenAI ReasoningEffort enum values
-// (minimal|low|medium|high|xhigh|none). Sending `reasoning.effort` is only
-// accepted by the Grazie backend on the OpenAI Responses API (/v1/responses),
-// never on /v1/chat/completions when function tools are present.
-const OPENAI_THINKING_LEVEL_MAP: Record<string, string> = {
-  off:     "none",
-  minimal: "minimal",
-  low:     "low",
-  medium:  "medium",
-  high:    "high",
-  xhigh:   "xhigh",
-  max:     "xhigh",
-};
-
-// Grok rejects `reasoning_effort: none` ("This model does not support
-// `reasoning_effort` value `none`."), so Pi's "off" maps to the lowest effort
-// the model accepts instead of disabling reasoning.
-const GROK_THINKING_LEVEL_MAP: Record<string, string> = {
-  ...OPENAI_THINKING_LEVEL_MAP,
-  off: "minimal",
 };
 
 // Anthropic separates thinking (adaptive here, via forceAdaptiveThinking) from
 // output_config.effort. Pi's single thinking slider maps onto effort. Pi hides
 // xhigh/max unless they are present in thinkingLevelMap (otherwise it clamps to
-// high), so each model lists exactly the extra levels it accepts. Fable cannot
-// disable thinking (off -> HTTP 400), so its "off" is null (unsupported).
+// high), so each model lists exactly the extra levels it accepts. Fable and
+// Claude 5.5 Opus/Sonnet cannot disable thinking (off -> HTTP 400), so their
+// "off" is null (unsupported).
 // Keyed by every Claude model id in MODELS: a missing id is a type error.
 type ClaudeModelId = Extract<ModelId, `claude-${string}`>;
 const XHIGH_MAX = { xhigh: "xhigh", max: "max" } as const;
@@ -148,14 +138,14 @@ const FABLE = { off: null, ...XHIGH_MAX } as const;
 export const CLAUDE_THINKING_LEVEL_MAP: Record<ClaudeModelId, NonNullable<ProviderModelConfig["thinkingLevelMap"]>> = {
   "claude-sonnet-4-6": MAX_ONLY,
   "claude-sonnet-5":   XHIGH_MAX,
-  "claude-sonnet-5-5": XHIGH_MAX,
-  "claude-haiku-5-5":  {},
+  "claude-sonnet-5-5": FABLE,
+  "claude-haiku-5-5":  XHIGH_MAX,
   "claude-haiku-5":    {},
   "claude-opus-4-6":   MAX_ONLY,
   "claude-opus-4-7":   XHIGH_MAX,
   "claude-opus-4-8":   XHIGH_MAX,
   "claude-opus-5":     XHIGH_MAX,
-  "claude-opus-5-5":   XHIGH_MAX,
+  "claude-opus-5-5":   FABLE,
   "claude-fable-5":    FABLE,
   "claude-fable-5-1":  FABLE,
 };
@@ -188,7 +178,7 @@ export function buildProviderModels(type: ProviderType, port: number): ProviderM
   const compat = type === "claude" ? CLAUDE_COMPAT : type === "gemini" ? undefined : OPENAI_COMPAT;
 
   return KNOWN_GRAZIE_MODELS
-    .filter((id) => id.startsWith(prefix) && !isLegacyModel(id))
+    .filter((id) => id.startsWith(prefix))
     .map((id) => {
       const meta = MODELS[id as ModelId];
       const model: ProviderModelConfig = {
@@ -216,7 +206,7 @@ export function buildProviderModels(type: ProviderType, port: number): ProviderM
         // OpenAI / Grok: use the Responses API so `reasoning.effort` is honoured
         // together with function tools. baseUrl is inherited from the provider.
         model.api = "openai-responses";
-        model.thinkingLevelMap = type === "grok" ? GROK_THINKING_LEVEL_MAP : OPENAI_THINKING_LEVEL_MAP;
+        model.thinkingLevelMap = (meta as ModelMeta).thinkingLevelMap ?? (type === "grok" ? GROK_THINKING_LEVEL_MAP : OPENAI_THINKING_LEVEL_MAP);
       }
       return model;
     });

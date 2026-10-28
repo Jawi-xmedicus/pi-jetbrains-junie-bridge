@@ -257,5 +257,13 @@ describe("477 from Grazie", () => {
     assert.equal(calls.length, 2);
     assert.equal(calls[0]?.headers["X-Free-Google-Api"], "true");
     assert.equal(calls[1]?.headers["X-Free-Google-Api"], undefined);
+
+    // State survives when the proxy is torn down and re-acquired (e.g. /reload, /new).
+    lease.release();
+    lease = await acquireServer();
+    calls = [];
+    await post("/v1/messages", { model: "claude-sonnet-5", messages: [] });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.headers["X-Free-Google-Api"], undefined);
   });
 });
