@@ -19,11 +19,16 @@ import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 const CLAUDE = { reasoning: true, contextWindow: 1000000, maxTokens: 128000 };
 const OPENAI = { reasoning: true, contextWindow: 1000000, maxTokens: 32768 };
 const GROK   = { reasoning: true, contextWindow: 500000,  maxTokens: 32768 };
-// Google IDs keep their upstream form verbatim (dots included): pi-ai detects
-// Gemini 3 thinking support by matching /gemini-3(\.\d+)?-(pro|flash)/ against
-// the model ID, and a dash-normalised ID would silently fall back to the
-// Gemini 2 budget API.
-const GEMINI = { reasoning: true, contextWindow: 1048576, maxTokens: 65536 };
+// Google IDs keep their upstream form verbatim (dots included): pi-ai picks the
+// Gemini 3+ `thinkingLevel` API over the old `thinkingBudget` API by matching
+// the model ID (/gemini-3(\.\d+)?-(pro|flash)/, /gemini-[4-9]/), and a
+// dash-normalised ID would silently fall back to the budget API.
+// None of them can disable thinking, so "off" is null (unsupported); without a
+// map Pi would offer "off" and send `thinkingBudget: 0`, which the backend
+// rejects. Only some models accept MINIMAL (maps mirror pi-ai's google catalog).
+const GEMINI_LEVELS = { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: null, max: null } as const;
+const GEMINI = { reasoning: true, contextWindow: 1048576, maxTokens: 65536, thinkingLevelMap: GEMINI_LEVELS };
+const GEMINI_MINIMAL = { ...GEMINI, thinkingLevelMap: { ...GEMINI_LEVELS, minimal: "minimal" } };
 
 interface ModelMeta {
   reasoning: boolean;
@@ -31,6 +36,8 @@ interface ModelMeta {
   maxTokens: number;
   /** Name Grazie expects, when it differs from the Pi-facing ID. */
   upstream?: string;
+  /** Pi thinking level → provider level; null marks a level as unsupported. */
+  thinkingLevelMap?: NonNullable<ProviderModelConfig["thinkingLevelMap"]>;
 }
 
 const MODELS = {
@@ -68,12 +75,12 @@ const MODELS = {
 
   // Google — passthrough via the Vertex-style generateContent path with
   // X-LLM-Model: google.
-  "gemini-3-flash-preview":  GEMINI,
+  "gemini-3-flash-preview":  GEMINI_MINIMAL,
   "gemini-3.1-pro-preview":  GEMINI,
-  "gemini-3.1-flash-lite":   GEMINI,
-  "gemini-3.5-flash":        GEMINI,
-  "gemini-3.5-flash-lite":   GEMINI,
-  "gemini-3.6-flash":        GEMINI,
+  "gemini-3.1-flash-lite":   GEMINI_MINIMAL,
+  "gemini-3.5-flash":        GEMINI_MINIMAL,
+  "gemini-3.5-flash-lite":   GEMINI_MINIMAL,
+  "gemini-3.6-flash":        GEMINI_MINIMAL,
   "gemini-3.7-flash":        GEMINI,
   "gemini-3.8-flash":        GEMINI,
   "gemini-4-argon":          GEMINI,
@@ -204,6 +211,7 @@ export function buildProviderModels(type: ProviderType, port: number): ProviderM
         // onto the Grazie Vertex path (see handleGoogle in server.ts).
         model.api = "google-generative-ai";
         model.baseUrl = `http://localhost:${port}/google/v1beta`;
+        model.thinkingLevelMap = (meta as ModelMeta).thinkingLevelMap;
       } else {
         // OpenAI / Grok: use the Responses API so `reasoning.effort` is honoured
         // together with function tools. baseUrl is inherited from the provider.
