@@ -69,7 +69,7 @@ function openTunnel(proxyUrl: string, host: string, port: string | number, signa
       signal,
     });
 
-    req.once("connect", (res, socket) => {
+    req.once("connect", (res, socket, head) => {
       if (res.statusCode !== 200) {
         socket.destroy();
         // Keep the status code in the message — extractErrorMessage() in
@@ -77,6 +77,7 @@ function openTunnel(proxyUrl: string, host: string, port: string | number, signa
         reject(new Error(`Proxy CONNECT failed: ${res.statusCode} ${res.statusMessage ?? ""}`.trim()));
         return;
       }
+      if (head.length > 0) socket.unshift(head);
       resolve(socket);
     });
     req.once("error", reject);

@@ -88,4 +88,22 @@ describe("provider model routing", () => {
     assert.equal(map.max, "max");
     assert.equal("xhigh" in map, false);
   });
+
+  it("disables 'off' on all Gemini models and 'minimal' on models that reject it", () => {
+    const noMinimal: Record<string, true> = {
+      "gemini-3.1-pro-preview": true,
+      "gemini-3.7-flash": true,
+      "gemini-3.8-flash": true,
+      "gemini-4-argon": true,
+    };
+    for (const m of buildProviderModels("gemini", PORT)) {
+      assert.ok(m.thinkingLevelMap, `${m.id} has no thinkingLevelMap`);
+      assert.equal(m.thinkingLevelMap.off, null, `${m.id} should disable off`);
+      assert.equal(
+        m.thinkingLevelMap.minimal,
+        noMinimal[m.id] ? null : "minimal",
+        `${m.id} minimal mapping`,
+      );
+    }
+  });
 });

@@ -29,7 +29,7 @@ Once authenticated, run `/model` to select a model provided by the junie bridge.
 
 Anthropic (Claude), OpenAI, xAI (Grok) and Google (Gemini) models are supported. The reasoning effort is adjustable in Pi.
 
-On Claude models, Pi's thinking slider maps to Anthropic `output_config.effort` (whole-response token spend); thinking itself stays adaptive. `xhigh` / `max` are declared per model so Pi does not clamp them to `high`, and Fable models hide `off` because they cannot disable thinking.
+On Claude models, Pi's thinking slider maps to Anthropic `output_config.effort` (whole-response token spend); thinking itself stays adaptive. `xhigh` / `max` are declared per model so Pi does not clamp them to `high`, and Fable models hide `off` because they cannot disable thinking. Gemini models likewise declare a per-model `thinkingLevelMap` (`off` disabled on all Gemini 3/4 models; `minimal` disabled on `3.1-pro-preview`, `3.7-flash`, `3.8-flash`, and `4-argon`).
 
 `/junie` and the status line report the paid (non-EAP) licence, the same bucket chat consumes.
 

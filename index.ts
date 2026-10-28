@@ -81,27 +81,22 @@ function valueSpans(text: string, color: ThemeColor): Span[] {
  * pi-tui's `matchesKey` handles all of this, but importing it is not an
  * option (see showOverlay below).
  */
-function isEscapeKey(data: string): boolean {
-  if (data === "\x1b") return true;
+function isCloseKey(data: string): boolean {
+  if (data === "\x1b" || data === "\r" || data === "\n" || data === "q") return true;
+  if (data.endsWith(":3u")) return false;
 
-  // CSI u: \x1b[<codepoint>[:alternates][;<mod>[:<event>]]u — 27 = Escape
+  // CSI u: \x1b[<codepoint>[:alternates][;<mod>[:<event>]]u — 27 = Escape, 13 = Enter
   const csiU = data.match(/^\x1b\[(\d+)(?::\d*)*(?:;\d+(?::\d+)?)?u$/);
-  if (csiU) return csiU[1] === "27";
+  if (csiU) return csiU[1] === "27" || csiU[1] === "13";
 
   // modifyOtherKeys: \x1b[27;<mod>;<codepoint>~
   return /^\x1b\[27;\d+;27~$/.test(data);
 }
 
-/** Enter, in legacy (\r or \n) and Kitty (`CSI 13 u`) encodings. */
-function isEnterKey(data: string): boolean {
-  if (data === "\r" || data === "\n") return true;
-  const csiU = data.match(/^\x1b\[(\d+)(?::\d*)*(?:;\d+(?::\d+)?)?u$/);
-  return csiU?.[1] === "13";
-}
-
-// Arrow keys with optional CSI parameters (the Kitty protocol adds modifier and
-// event fields), plus the vi-style aliases and space.
-const SCROLL_KEY_RE = /\x1b\[([\d;:]*)([AB])|([kj ])/g;
+// Arrow/Home/End keys with optional CSI parameters (the Kitty protocol adds
+// modifier and event fields), PageUp/PageDown/Home/End tilde sequences, plus
+// vi-style aliases and space.
+const SCROLL_KEY_RE = /\x1b\[([\d;:]*)([ABHF])|\x1b\[([1456])(?:;[\d:]*)?~|([kjgG ])/g;
 
 /**
  * Lines to scroll for an input chunk: negative is up, 0 means "not a scroll key".
@@ -110,13 +105,13 @@ const SCROLL_KEY_RE = /\x1b\[([\d;:]*)([AB])|([kj ])/g;
  * chunk can carry several presses — counting them all keeps a held arrow
  * scrolling smoothly instead of moving a single line per chunk.
  */
-function scrollStep(data: string): number {
+function scrollStep(data: string, pageSize = 10): number {
   let step = 0;
   SCROLL_KEY_RE.lastIndex = 0;
   for (let m = SCROLL_KEY_RE.exec(data); m; m = SCROLL_KEY_RE.exec(data)) {
     // Kitty key-release events (event type 3) would otherwise count twice.
-    if (m[1] && m[1].endsWith(":3")) continue;
-    switch (m[2] ?? m[3]) {
+    if (m[1]?.endsWith(":3") || m[0].endsWith(":3~")) continue;
+    switch (m[2] ?? m[3] ?? m[4]) {
       case "A":
       case "k":
         step -= 1;
@@ -125,8 +120,22 @@ function scrollStep(data: string): number {
       case "j":
         step += 1;
         break;
+      case "5":
+        step -= pageSize;
+        break;
+      case "6":
       case " ":
-        step += 10;
+        step += pageSize;
+        break;
+      case "H":
+      case "1":
+      case "g":
+        step = -Infinity;
+        break;
+      case "F":
+      case "4":
+      case "G":
+        step = Infinity;
         break;
     }
   }
@@ -263,7 +272,7 @@ export default async function (pi: ExtensionAPI) {
 
   function applyBalanceStatus(ctx: ExtensionContext, { balanceLeft, balanceUnit }: BalanceSnapshot) {
     startBalance ??= balanceLeft;
-    const used = startBalance - balanceLeft;
+    const used = Math.max(0, startBalance - balanceLeft);
     const money = makeAmountFormatter(balanceUnit);
     ctx.ui.setStatus(
       "junie",
@@ -279,6 +288,7 @@ export default async function (pi: ExtensionAPI) {
   async function syncStatus(ctx: ExtensionContext, model = ctx.model) {
     const token = {};
     statusToken = token;
+    if (!ctx.hasUI) return;
 
     if (!isJunieModel(model)) {
       clearStatus(ctx);
@@ -349,33 +359,38 @@ export default async function (pi: ExtensionAPI) {
       // The TUI does not clip a component to the terminal — anything too tall
       // just pushes the conversation off-screen. So the report scrolls itself.
       let offset = 0;
+      let maxOffset = 0;
+      let viewport = 14;
 
       return {
         render(width: number) {
           const inner = Math.max(20, width - 2);
           const body = report.markdown.split("\n").flatMap((raw) => renderReportLine(raw, inner, theme));
 
-          const viewport = Math.max(5, (process.stdout.rows ?? 24) - 10);
-          const maxOffset = Math.max(0, body.length - viewport);
+          viewport = Math.max(5, (process.stdout.rows ?? 24) - 10);
+          maxOffset = Math.max(0, body.length - viewport);
           offset = Math.min(offset, maxOffset);
 
           const rule = theme.fg("accent", "─".repeat(width));
           const hint = maxOffset > 0
-            ? ` ↑/↓ to scroll (${offset + 1}-${Math.min(offset + viewport, body.length)} of ${body.length}) · Enter/Esc to close`
-            : " Press Enter or Esc to close";
+            ? ` ↑/↓/PgUp/PgDn to scroll (${offset + 1}-${Math.min(offset + viewport, body.length)} of ${body.length}) · q/Enter/Esc to close`
+            : " Press q, Enter or Esc to close";
 
           return [rule, ...body.slice(offset, offset + viewport), theme.fg("dim", hint), rule];
         },
         invalidate() {},
         handleInput(data: string) {
-          if (isEscapeKey(data) || isEnterKey(data)) {
+          if (isCloseKey(data)) {
             done(undefined);
             return;
           }
-          const step = scrollStep(data);
+          const step = scrollStep(data, viewport);
           if (step !== 0) {
-            offset = Math.max(0, offset + step);
-            tui.requestRender();
+            const next = Math.max(0, Math.min(maxOffset, offset + step));
+            if (next !== offset) {
+              offset = next;
+              tui.requestRender();
+            }
           }
         },
       };
@@ -406,7 +421,7 @@ export default async function (pi: ExtensionAPI) {
       // The balance round-trip dominates the command's latency, so everything
       // it doesn't depend on is fetched alongside it rather than after it.
       const [balanceRes, modelsRes, testRes] = await Promise.all([
-        fetch(`http://localhost:${port}/junie/balance`, { headers: balanceHeaders }),
+        fetch(`http://localhost:${port}/junie/balance?full=1`, { headers: balanceHeaders }),
         fetch(`http://localhost:${port}/v1/models`),
         wantsConnTest ? fetch(`http://localhost:${port}/junie/test`) : undefined,
       ]);
@@ -437,7 +452,7 @@ export default async function (pi: ExtensionAPI) {
         }
 
         if (startBalance != null) {
-          lines.push(`**Session usage:** −${money(startBalance - balanceInfo.balanceLeft)}`);
+          lines.push(`**Session usage:** −${money(Math.max(0, startBalance - balanceInfo.balanceLeft))}`);
         }
 
         if (balanceInfo.licenseType) {

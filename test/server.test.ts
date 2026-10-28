@@ -217,7 +217,7 @@ describe("balance", () => {
   it("asks Grazie for the non-EAP bucket on /auth/test and every quota call", async () => {
     calls = [];
     upstream = async () => jsonResponse(200, { active: true, balanceLeft: 1, balanceUnit: "CREDITS" });
-    const res = await rawRequest("/junie/balance");
+    const res = await rawRequest("/junie/balance?full=1");
     assert.equal(res.status, 200);
 
     const authTest = calls.filter((c) => c.url.endsWith("/auth/test"));
@@ -227,6 +227,20 @@ describe("balance", () => {
     for (const c of [...authTest, ...quota]) {
       assert.equal(c.headers["X-Accept-EAP-License"], "false", c.url);
     }
+  });
+
+  it("skips the refill metadata request on status-bar polls and falls back to balanceLeft when quota buckets are absent", async () => {
+    calls = [];
+    upstream = async (url) =>
+      url.includes("/quota/get")
+        ? jsonResponse(200, { current: { license: "lic-1" } })
+        : jsonResponse(200, { active: true, balanceLeft: 42, balanceUnit: "CREDITS" });
+
+    const res = await rawRequest("/junie/balance");
+    assert.equal(res.status, 200);
+    assert.equal(calls.filter((c) => c.url.includes("/quota/metadata/refill")).length, 0);
+    const body = JSON.parse(res.body) as { balanceLeft: number };
+    assert.equal(body.balanceLeft, 42);
   });
 });
 

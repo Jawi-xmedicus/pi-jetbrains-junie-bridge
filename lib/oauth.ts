@@ -53,6 +53,8 @@ function getJwtExpiresIn(token: string): number | undefined {
 }
 
 async function startCallbackServer(signal?: AbortSignal) {
+  signal?.throwIfAborted();
+
   const { promise: callbackPromise, resolve: resolveCallback, reject: rejectCallback } =
     Promise.withResolvers<{ code: string; state: string }>();
 
@@ -63,18 +65,18 @@ async function startCallbackServer(signal?: AbortSignal) {
     const error = url.searchParams.get("error") ?? url.searchParams.get("error_description");
 
     if (error) {
-      res.writeHead(200, { "Content-Type": "text/html" });
+      res.writeHead(200, { "Content-Type": "text/html", "Connection": "close" });
       res.end("<html><body><h1>Authentication Failed</h1><p>You can close this window.</p></body></html>");
       rejectCallback(new Error(`OAuth error: ${error}`));
       return;
     }
     if (code && reqState) {
-      res.writeHead(200, { "Content-Type": "text/html" });
+      res.writeHead(200, { "Content-Type": "text/html", "Connection": "close" });
       res.end("<html><body><h1>Authentication Successful</h1><p>You can close this window and return to Pi.</p></body></html>");
       resolveCallback({ code, state: reqState });
       return;
     }
-    res.writeHead(404);
+    res.writeHead(404, { "Connection": "close" });
     res.end();
   });
 
@@ -83,18 +85,27 @@ async function startCallbackServer(signal?: AbortSignal) {
     signal.addEventListener("abort", () => {
       rejectCallback(new Error("Login aborted"));
       server.close();
+      server.closeAllConnections?.();
     }, { once: true });
   }
 
   const { promise: portReady, resolve: resolvePort, reject: rejectPort } = Promise.withResolvers<number>();
   let current = OAUTH.callbackPortStart;
+  const onError = () => {
+    current++;
+    tryPort();
+  };
+  server.once("listening", () => {
+    server.off("error", onError);
+    resolvePort(current);
+  });
   const tryPort = () => {
     if (current > OAUTH.callbackPortEnd) {
       rejectPort(new Error(`Cannot start OAuth callback server on ports ${OAUTH.callbackPortStart}-${OAUTH.callbackPortEnd}`));
       return;
     }
-    server.once("error", () => { current++; tryPort(); });
-    server.listen(current, "localhost", () => resolvePort(current));
+    server.once("error", onError);
+    server.listen(current, "localhost");
   };
   tryPort();
   const port = await portReady;
@@ -157,6 +168,7 @@ export async function junieLogin(callbacks: LoginCallbacks): Promise<OAuthCreden
     };
   } finally {
     server.close();
+    server.closeAllConnections?.();
   }
 }
 

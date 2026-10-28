@@ -242,6 +242,7 @@ function readBody(req: IncomingMessage): Promise<string> {
 }
 
 function sendJson(res: ServerResponse, status: number, data: unknown): void {
+  if (res.headersSent || res.destroyed) return;
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
 }
@@ -338,7 +339,7 @@ async function handleChatCompletions(req: IncomingMessage, res: ServerResponse):
     }
 
     if (!payload.model.startsWith("openai-")) {
-      sendJson(res, 400, { error: { message: `Model ${payload.model} is not supported via /v1/chat/completions. Use claude-* models via /v1/messages.`, type: "invalid_request" } });
+      sendJson(res, 400, { error: { message: `Model ${payload.model} is not supported via /v1/chat/completions. Use openai-*/grok-* via /v1/responses, claude-* via /v1/messages, or gemini-* via /google/v1beta.`, type: "invalid_request" } });
       return;
     }
 
@@ -378,7 +379,7 @@ async function handleResponses(req: IncomingMessage, res: ServerResponse): Promi
     }
 
     if (!payload.model.startsWith("openai-") && !payload.model.startsWith("grok-")) {
-      sendJson(res, 400, { error: { message: `Model ${payload.model} is not supported via /v1/responses. Use claude-* models via /v1/messages.`, type: "invalid_request" } });
+      sendJson(res, 400, { error: { message: `Model ${payload.model} is not supported via /v1/responses. Use claude-* via /v1/messages or gemini-* via /google/v1beta.`, type: "invalid_request" } });
       return;
     }
 
@@ -418,7 +419,7 @@ async function handleMessages(req: IncomingMessage, res: ServerResponse): Promis
     }
 
     if (!payload.model.startsWith("claude-")) {
-      sendJson(res, 400, { error: { message: `Model ${payload.model} should use /v1/chat/completions, not /v1/messages.`, type: "invalid_request" } });
+      sendJson(res, 400, { error: { message: `Model ${payload.model} is not supported via /v1/messages. Use openai-*/grok-* via /v1/responses or gemini-* via /google/v1beta.`, type: "invalid_request" } });
       return;
     }
 
@@ -548,7 +549,7 @@ export interface QuotaSummary {
   license?: string;
   spent?: number;
   maximum?: number;
-  available: number;
+  available?: number;
   until?: number;
   tariff?: CreditBucket;
   topUp?: CreditBucket;
@@ -597,9 +598,8 @@ function buildQuota(quota: GrazieQuotaResponse | undefined, refill: GrazieRefill
 
   const tariff = quotaDetails(current.tariffQuota);
   const topUp = quotaDetails(current.topUpQuota);
-  const available = [tariff?.available, topUp?.available]
-    .filter((n): n is number => typeof n === "number")
-    .reduce((a, b) => a + b, 0);
+  const buckets = [tariff?.available, topUp?.available].filter((n): n is number => typeof n === "number");
+  const available = buckets.length > 0 ? buckets.reduce((a, b) => a + b, 0) : undefined;
 
   return {
     license: current.license,
@@ -618,7 +618,7 @@ function buildQuota(quota: GrazieQuotaResponse | undefined, refill: GrazieRefill
   };
 }
 
-async function handleBalance(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleBalance(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   // Use explicitly provided auth, or fall back to last seen auth from chat requests
   const auth = getAuthHeader(req) || state.lastAuthHeader;
   if (!auth) {
@@ -626,18 +626,23 @@ async function handleBalance(req: IncomingMessage, res: ServerResponse): Promise
     return;
   }
 
+  // Status-bar polls only need balanceLeft/balanceUnit; refill metadata is only
+  // rendered in the /junie overlay (?full=1).
+  const wantsRefill = url.searchParams.get("full") === "1";
+
   try {
-    // All three run concurrently — the quota calls cost ~1s each, and waiting
-    // for /auth/test first would make /junie feel sluggish.
+    // Run concurrently — the quota calls cost ~1s each, and waiting for
+    // /auth/test first would make /junie feel sluggish.
     const [test, quota, refill] = await Promise.all([
       proxyFetch(`${GRAZIE_AUTH_BASE}/auth/test`, {
         headers: grazieUserHeaders(auth),
         signal: AbortSignal.timeout(BALANCE_TIMEOUT_MS),
       }),
       grazieQuotaPost<GrazieQuotaResponse>(auth, "/user/v5/quota/get").catch(() => undefined),
-      grazieQuotaPost<GrazieRefillResponse>(auth, "/user/v5/quota/metadata/refill").catch(() => undefined),
+      wantsRefill
+        ? grazieQuotaPost<GrazieRefillResponse>(auth, "/user/v5/quota/metadata/refill").catch(() => undefined)
+        : undefined,
     ]);
-
     if (!test.ok) {
       // Pass the upstream detail through — "no active licence" and "token
       // expired" are very different problems for the user.
@@ -686,24 +691,32 @@ async function handleConnTest(_req: IncomingMessage, res: ServerResponse): Promi
     tests: {},
   };
 
-  // Test 1: DNS resolution
+  // Test 1: DNS resolution (uses OS resolver so /etc/hosts, IPv6, and split-DNS work)
   try {
     const host = new URL(UPSTREAM_BASE).hostname;
-    const addrs = await dns.resolve4(host);
-    result.tests.dns = { ok: true, addresses: addrs };
+    const addrs = await dns.lookup(host, { all: true });
+    result.tests.dns = { ok: true, addresses: addrs.map((a) => a.address) };
   } catch (e) {
     result.tests.dns = { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
 
   // Test 2: HTTPS fetch through proxy
   try {
-    const r = await proxyFetch(UPSTREAM_BASE, { method: "GET" });
+    const r = await proxyFetch(UPSTREAM_BASE, {
+      method: "GET",
+      signal: AbortSignal.timeout(BALANCE_TIMEOUT_MS),
+    });
+    await r.body?.cancel().catch(() => {});
     result.tests.fetch = { ok: true, status: r.status };
   } catch (e) {
     result.tests.fetch = { ok: false, error: extractErrorMessage(e) };
   }
 
-  const allOk = Object.values(result.tests).every((t) => t.ok);
+  // Behind a corporate proxy, the proxy resolves DNS on our behalf via CONNECT,
+  // so local DNS failure alone does not mean connectivity is broken.
+  const allOk = diag.proxy
+    ? Boolean(result.tests.fetch?.ok)
+    : Object.values(result.tests).every((t) => t.ok);
   sendJson(res, allOk ? 200 : 502, result);
 }
 
@@ -738,7 +751,7 @@ async function startServer(): Promise<StartedServer> {
     } else if (req.method === "GET" && (path === "/v1/models" || path === "/models")) {
       handleModels(req, res);
     } else if (req.method === "GET" && path === "/junie/balance") {
-      await handleBalance(req, res);
+      await handleBalance(req, res, url);
     } else if (req.method === "GET" && path === "/junie/test") {
       await handleConnTest(req, res);
     } else if (req.method === "GET" && path === "/") {

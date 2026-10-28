@@ -5,6 +5,11 @@
 ### Fixed
 - `/junie` and the status line could show a different licence than chat consumes. `/auth/test` and the QuotaAPI calls now send `X-Accept-EAP-License: false` like chat does; without it Grazie prefers `JUNP` (USD, EAP) over `AIP`/`AIPU` (credits). Port of upstream PR #6.
 - Claude models: Pi's thinking slider clamped `xhigh`/`max` to `high`, and `off` on Fable models answered 400. Claude models now declare a per-model `thinkingLevelMap` (slider → Anthropic `output_config.effort`; thinking stays adaptive). Port of upstream PR #6.
+- Gemini models: `off` on any Gemini 3/4 model and `minimal` on `gemini-3.1-pro-preview`, `gemini-3.7-flash`, `gemini-3.8-flash`, and `gemini-4-argon` answered 400. Gemini models now declare `thinkingLevelMap` matching `pi-ai`'s Google catalog so unsupported levels are hidden and clamped.
+- Subagents and headless sessions (`!ctx.hasUI`) no longer poll `/junie/balance` on every session start and turn end for a status bar that does not exist, and status-bar polls skip the `/user/v5/quota/metadata/refill` request (only fetched on `/junie`).
+- `/junie/balance` falls back to `/auth/test` `balanceLeft` instead of reporting `$0.00` if `quota.current` omits `tariffQuota`/`topUpQuota`, and session usage is clamped so mid-session refills/top-ups never display `−$-…`.
+- `/junie/test` enforces a timeout on the upstream fetch, uses the OS resolver (`dns.lookup`), and does not fail the overall check on local DNS failure when an HTTP proxy is configured.
+- `/junie` overlay supports `q` to close, `PgUp`/`PgDn`/`Home`/`End`/`g`/`G` scrolling, ignores Kitty key-release events on Enter/Esc, and avoids redundant re-renders when scrolling past the top/bottom.
 
 ## 1.5.0
 
